@@ -64,10 +64,13 @@ bool firstMouse = true;
 float deltaTime = 0.0f;
 float lastFrame = 0.0f;
 
-// Физика (без автоматического подъёма на ступеньки)
-float playerWidth  = 0.6f;
-float playerHeight = 1.8f;
-float eyeHeight    = 1.62f;      // стандартная высота глаз в Minecraft
+// Физика игрока:
+// - ширина коллизии: 0.3 блока (по 0.35 блока отступа с каждой стороны при стоянии по центру блока)
+// - высота коллизии: 1.9 блока
+// - камера всегда по центру тела по X/Z
+float playerWidth  = 0.3f;
+float playerHeight = 1.9f;
+float eyeHeight    = 1.62f;
 float velocityY    = 0.0f;
 bool onGround      = true;
 float gravity      = 20.0f;
@@ -1096,6 +1099,15 @@ bool checkCollision(const glm::vec3& aabbMin, const glm::vec3& aabbMax) {
     return false;
 }
 
+bool intersectsSolidBlockAABB(const glm::vec3& playerMin, const glm::vec3& playerMax, int bx, int by, int bz) {
+    const glm::vec3 blockMin((float)bx - 0.5f, (float)by - 0.5f, (float)bz - 0.5f);
+    const glm::vec3 blockMax((float)bx + 0.5f, (float)by + 0.5f, (float)bz + 0.5f);
+    const bool overlapX = (playerMin.x < blockMax.x) && (playerMax.x > blockMin.x);
+    const bool overlapY = (playerMin.y < blockMax.y) && (playerMax.y > blockMin.y);
+    const bool overlapZ = (playerMin.z < blockMax.z) && (playerMax.z > blockMin.z);
+    return overlapX && overlapY && overlapZ;
+}
+
 // Корректировка позиции по одной оси (исправлено)
 bool adjustAxis(glm::vec3& pos, float delta, int axis, const glm::vec3& aabbMin, const glm::vec3& aabbMax) {
     if (delta == 0.0f) return false;
@@ -1285,6 +1297,12 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 case 5: newZ=hitZ-1; break;
             }
             if (getBlockAt(newX,newY,newZ) != 0 && getBlockAt(newX,newY,newZ) != 5) return;
+
+            // Нельзя ставить блок внутрь хитбокса игрока: это ломает движение/ломание блоков.
+            glm::vec3 playerMin, playerMax;
+            getPlayerAABB(playerPos, playerMin, playerMax);
+            if (intersectsSolidBlockAABB(playerMin, playerMax, newX, newY, newZ)) return;
+
             setBlockAt(newX,newY,newZ, currentBlockType);
         }
     }
