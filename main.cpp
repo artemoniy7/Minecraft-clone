@@ -450,8 +450,33 @@ void workerFunction() {
 
 // Прототипы
 int getBlockAt(int wx, int wy, int wz);
+int getBlockAtForCollision(int wx, int wy, int wz);
+int getBlockAtCollision(int wx, int wy, int wz); // alias для совместимости
 void setBlockAt(int wx, int wy, int wz, int type);
 int getBlockAtForMesh(int wx, int wy, int wz);
+
+// === НОВАЯ ФУНКЦИЯ КОЛЛИЗИИ ===
+bool isColliding(glm::vec3 pos) {
+    constexpr float EPS = 0.001f;
+    float halfW = playerWidth / 2.0f;
+    int minX = (int)std::floor(pos.x - halfW + EPS);
+    int maxX = (int)std::floor(pos.x + halfW - EPS);
+    int minY = (int)std::floor(pos.y + EPS);
+    int maxY = (int)std::floor(pos.y + playerHeight - EPS);
+    int minZ = (int)std::floor(pos.z - halfW + EPS);
+    int maxZ = (int)std::floor(pos.z + halfW - EPS);
+
+    for (int x = minX; x <= maxX; ++x) {
+        for (int y = minY; y <= maxY; ++y) {
+            for (int z = minZ; z <= maxZ; ++z) {
+                int block = getBlockAtForCollision(x, y, z);
+                if (block == BLOCK_UNKNOWN || (block != 0 && block != 5))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
 
 // Шейдерные переменные
 unsigned int shaderProgram, reticleProgram, reticleVAO;
@@ -890,17 +915,19 @@ int getBlockAt(int wx, int wy, int wz) {
     return it->second.getLocalBlock(lx, wy, lz);
 }
 
-// Функция для коллизий: незагруженные чанки считаем воздухом (0)
-int getBlockAtCollision(int wx, int wy, int wz) {
-    if (wy < 0 || wy >= CHUNK_SIZE_Y) return 0;
+int getBlockAtForCollision(int wx, int wy, int wz) {
+    if (wy < 0 || wy >= CHUNK_SIZE_Y) return BLOCK_UNKNOWN;
     int cx = (wx >= 0) ? wx / CHUNK_SIZE_X : (wx - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
     int cz = (wz >= 0) ? wz / CHUNK_SIZE_Z : (wz - CHUNK_SIZE_Z + 1) / CHUNK_SIZE_Z;
     auto it = loadedChunks.find({cx, cz});
-    if (it == loadedChunks.end()) return 0; // не загружен -> воздух
+    if (it == loadedChunks.end()) return BLOCK_UNKNOWN;
     int lx = wx - cx * CHUNK_SIZE_X;
     int lz = wz - cz * CHUNK_SIZE_Z;
-    if (lx < 0 || lx >= CHUNK_SIZE_X || lz < 0 || lz >= CHUNK_SIZE_Z) return 0;
     return it->second.getLocalBlock(lx, wy, lz);
+}
+
+int getBlockAtCollision(int wx, int wy, int wz) {
+    return getBlockAtForCollision(wx, wy, wz);
 }
 
 void setBlockAt(int wx, int wy, int wz, int type) {
@@ -1164,88 +1191,30 @@ bool adjustAxis(glm::vec3& pos, float delta, int axis, const glm::vec3& aabbMin,
 void updatePlayer(float dt) {
     if (dt > 0.05f) dt = 0.05f;
 
-    // Спринт
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
-        currentSpeed = sprintSpeed;
-    else
-        currentSpeed = walkSpeed;
+    float speed = walkSpeed;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) speed = sprintSpeed;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) speed *= 0.45f;
 
-    // Горизонтальное направление
+    glm::vec3 forward = glm::normalize(cameraFront);
+    glm::vec3 right = glm::normalize(glm::cross(cameraFront, cameraUp));
+    glm::vec3 up = glm::normalize(cameraUp);
+
     glm::vec3 moveDir(0.0f);
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_W) == GLFW_PRESS) moveDir += cameraFront;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_S) == GLFW_PRESS) moveDir -= cameraFront;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_A) == GLFW_PRESS) moveDir -= glm::normalize(glm::cross(cameraFront, cameraUp));
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_D) == GLFW_PRESS) moveDir += glm::normalize(glm::cross(cameraFront, cameraUp));
-    if (glm::length(moveDir) > 0.1f) moveDir = glm::normalize(moveDir);
-    moveDir.y = 0.0f;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_W) == GLFW_PRESS) moveDir += forward;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_S) == GLFW_PRESS) moveDir -= forward;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_A) == GLFW_PRESS) moveDir -= right;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_D) == GLFW_PRESS) moveDir += right;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_SPACE) == GLFW_PRESS) moveDir += up;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_C) == GLFW_PRESS) moveDir -= up;
 
-    glm::vec3 desiredMove = moveDir * currentSpeed * dt;
-
-    // Вертикальное движение (гравитация и прыжок)
-    velocityY -= gravity * dt;
-    float dy = velocityY * dt;
-
-    // Сначала горизонтальное перемещение (обычно так делают, чтобы избежать "скольжения" по стенам)
-    glm::vec3 aabbMin, aabbMax;
-    getPlayerAABB(playerPos, aabbMin, aabbMax);
-    
-    if (desiredMove.x != 0.0f) {
-        adjustAxis(playerPos, desiredMove.x, 0, aabbMin, aabbMax);
-        // После изменения X нужно обновить AABB для следующей оси
-        getPlayerAABB(playerPos, aabbMin, aabbMax);
-    }
-    if (desiredMove.z != 0.0f) {
-        adjustAxis(playerPos, desiredMove.z, 2, aabbMin, aabbMax);
-        getPlayerAABB(playerPos, aabbMin, aabbMax);
-    }
-    
-    // Вертикальное перемещение
-    adjustAxis(playerPos, dy, 1, aabbMin, aabbMax);
-
-    // Проверка, стоит ли на земле (с небольшим допуском вверх)
-    getPlayerAABB(playerPos, aabbMin, aabbMax);
-    glm::vec3 footCheckMin = aabbMin;
-    glm::vec3 footCheckMax = aabbMax;
-    footCheckMin.y -= 0.1f;     // небольшой запас, чтобы избежать "залипания"
-    footCheckMax.y -= 0.1f;
-    bool wasOnGround = onGround;
-    onGround = checkCollision(footCheckMin, footCheckMax);
-    if (onGround && velocityY < 0.0f) {
-        velocityY = 0.0f;
-        // Корректируем позицию, чтобы ноги ровно стояли на блоке
-        getPlayerAABB(playerPos, aabbMin, aabbMax);
-        // Найти высоту блока под ногами
-        int blockY = (int)std::floor(aabbMin.y - 0.05f);
-        if (blockY >= 0) {
-            float newY = (float)blockY + 1.0f; // верхняя граница блока
-            if (playerPos.y + playerHeight > newY + 0.01f) {
-                playerPos.y = newY;
-            }
-        }
+    if (glm::length(moveDir) > 0.001f) {
+        cameraPos += glm::normalize(moveDir) * speed * dt;
     }
 
-    // Прыжок
-    if (onGround && glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_SPACE) == GLFW_PRESS && !jumpRequested) {
-        velocityY = jumpSpeed;
-        onGround = false;
-        jumpRequested = true;
-    }
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_SPACE) == GLFW_RELEASE) {
-        jumpRequested = false;
-    }
-
-    // Небольшая эпсилон-коррекция для устранения застреваний
-    getPlayerAABB(playerPos, aabbMin, aabbMax);
-    if (checkCollision(aabbMin, aabbMax)) {
-        for (float up = 0.01f; up <= 0.2f; up += 0.01f) {
-            playerPos.y += up;
-            getPlayerAABB(playerPos, aabbMin, aabbMax);
-            if (!checkCollision(aabbMin, aabbMax)) break;
-        }
-    }
-
-    // Установка камеры: строго по центру X/Z и на высоте eyeHeight от ног
-    cameraPos = playerPos + glm::vec3(0.0f, eyeHeight, 0.0f);
+    // Поддерживаем playerPos только для UI/логики чанков.
+    playerPos = cameraPos - glm::vec3(0.0f, eyeHeight, 0.0f);
+    velocityY = 0.0f;
+    onGround = false;
 }
 
 // Сброс игрока в начальную точку
@@ -1635,9 +1604,9 @@ int main() {
             ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
             ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
             ImGui::Text("Chunks: %zu", loadedChunks.size());
-            ImGui::Text("Pos: (%.1f, %.1f, %.1f)", playerPos.x, playerPos.y, playerPos.z);
+            ImGui::Text("Camera: (%.1f, %.1f, %.1f)", cameraPos.x, cameraPos.y, cameraPos.z);
             ImGui::Text("Block: %s", blockTypes[currentBlockType].name.c_str());
-            ImGui::Text("On ground: %s", onGround ? "Yes" : "No");
+            ImGui::Text("Mode: Free camera (WASD + Space/C)");
             if (ImGui::Button("Exit to Menu")) {
                 gameStarted = false;
                 firstMouse = true;
