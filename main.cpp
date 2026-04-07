@@ -61,6 +61,7 @@ float pitch =  0.0f;
 float lastX = SCR_WIDTH / 2.0f;
 float lastY = SCR_HEIGHT / 2.0f;
 bool firstMouse = true;
+bool ignoreMouseEvent = false;
 float deltaTime = 0.0f;
 float lastFrame = 0.0f;
 
@@ -1259,6 +1260,8 @@ void resetPlayer() {
     yaw = -90.0f;
     pitch = 0.0f;
     cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
+    firstMouse = true;
+    ignoreMouseEvent = false;
 }
 
 // Обработка мыши и клавиатуры
@@ -1423,14 +1426,33 @@ int main() {
     glfwSetWindowPos(window, 0, 0);
     glfwMakeContextCurrent(window);
     glfwSetFramebufferSizeCallback(window, [](GLFWwindow*, int w, int h) { glViewport(0, 0, w, h); });
-    glfwSetCursorPosCallback(window, [](GLFWwindow*, double x, double y) {
+    glfwSetCursorPosCallback(window, [](GLFWwindow* win, double x, double y) {
         mouseX = x; mouseY = y;
         if (!gameStarted) return;
-        static bool first = true;
-        if (first) { lastX = x; lastY = y; first = false; }
-        float xoffset = x - lastX;
-        float yoffset = lastY - y;
-        lastX = x; lastY = y;
+        if (ignoreMouseEvent) { ignoreMouseEvent = false; return; }
+
+        int ww = 0, wh = 0;
+        glfwGetWindowSize(win, &ww, &wh);
+        double centerX = ww * 0.5;
+        double centerY = wh * 0.5;
+
+        if (firstMouse) {
+            lastX = static_cast<float>(centerX);
+            lastY = static_cast<float>(centerY);
+            ignoreMouseEvent = true;
+            glfwSetCursorPos(win, centerX, centerY);
+            firstMouse = false;
+            return;
+        }
+
+        float xoffset = static_cast<float>(x - centerX);
+        float yoffset = static_cast<float>(centerY - y);
+
+        ignoreMouseEvent = true;
+        glfwSetCursorPos(win, centerX, centerY);
+        lastX = static_cast<float>(centerX);
+        lastY = static_cast<float>(centerY);
+
         const float sensitivity = 0.1f;
         xoffset *= sensitivity; yoffset *= sensitivity;
         yaw += xoffset; pitch += yoffset;
@@ -1559,6 +1581,12 @@ int main() {
                 if (allReady) {
                     gameStarted = true;
                     loadingInProgress = false;
+                    int ww = 0, wh = 0;
+                    glfwGetWindowSize(window, &ww, &wh);
+                    lastX = ww * 0.5f;
+                    lastY = wh * 0.5f;
+                    firstMouse = true;
+                    ignoreMouseEvent = false;
                     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
                     initReticle();
                     startMusic();
@@ -1575,7 +1603,7 @@ int main() {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glm::mat4 model = glm::mat4(1.0f);
             glm::mat4 view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
-            int w,h; glfwGetWindowSize(window,&w,&h);
+            int w,h; glfwGetFramebufferSize(window,&w,&h);
             glm::mat4 projection = glm::perspective(glm::radians(65.0f), (float)w/(float)h, 0.1f, 1000.0f);
             glUseProgram(shaderProgram);
             glUniformMatrix4fv(u_modelLoc,1,GL_FALSE,glm::value_ptr(model));
@@ -1612,6 +1640,8 @@ int main() {
             ImGui::Text("On ground: %s", onGround ? "Yes" : "No");
             if (ImGui::Button("Exit to Menu")) {
                 gameStarted = false;
+                firstMouse = true;
+                ignoreMouseEvent = false;
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
                 for (auto& pair : loadedChunks) {
                     for (auto& p : pair.second.vaoPerType) {
