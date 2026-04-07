@@ -1259,6 +1259,7 @@ void resetPlayer() {
     yaw = -90.0f;
     pitch = 0.0f;
     cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
+    firstMouse = true;
 }
 
 // Обработка мыши и клавиатуры
@@ -1426,8 +1427,7 @@ int main() {
     glfwSetCursorPosCallback(window, [](GLFWwindow*, double x, double y) {
         mouseX = x; mouseY = y;
         if (!gameStarted) return;
-        static bool first = true;
-        if (first) { lastX = x; lastY = y; first = false; }
+        if (firstMouse) { lastX = x; lastY = y; firstMouse = false; return; }
         float xoffset = x - lastX;
         float yoffset = lastY - y;
         lastX = x; lastY = y;
@@ -1559,6 +1559,8 @@ int main() {
                 if (allReady) {
                     gameStarted = true;
                     loadingInProgress = false;
+                    glfwGetCursorPos(window, &lastX, &lastY);
+                    firstMouse = true;
                     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
                     initReticle();
                     startMusic();
@@ -1575,7 +1577,7 @@ int main() {
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glm::mat4 model = glm::mat4(1.0f);
             glm::mat4 view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
-            int w,h; glfwGetWindowSize(window,&w,&h);
+            int w,h; glfwGetFramebufferSize(window,&w,&h);
             glm::mat4 projection = glm::perspective(glm::radians(65.0f), (float)w/(float)h, 0.1f, 1000.0f);
             glUseProgram(shaderProgram);
             glUniformMatrix4fv(u_modelLoc,1,GL_FALSE,glm::value_ptr(model));
@@ -1612,6 +1614,7 @@ int main() {
             ImGui::Text("On ground: %s", onGround ? "Yes" : "No");
             if (ImGui::Button("Exit to Menu")) {
                 gameStarted = false;
+                firstMouse = true;
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
                 for (auto& pair : loadedChunks) {
                     for (auto& p : pair.second.vaoPerType) {
