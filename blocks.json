@@ -1,0 +1,39 @@
+{
+    "blocks": [
+      {
+        "id": 2,
+        "name": "dirt",
+        "texture_strip": "textures/dirt_strip.png"
+      },
+      {
+        "id": 5,
+        "name": "water",
+        "texture_strip": "textures/water.png"
+      },
+      {
+        "id":3,
+        "name": "stone",
+        "texture_strip": "textures/stone_strip.png"
+      },
+      {
+        "id": 1,
+        "name": "grass",
+        "texture_strip":"textures/grass_strip.png"
+      },
+      {
+        "id":4,
+        "name": "sand",
+        "texture_strip":"textures/sand_strip.png"
+      },
+      {
+        "id": 6,
+        "name": "oak_log",
+        "texture_strip":"textures/oak_log_strip.png"
+      },
+      {
+        "id": 7,
+        "name": "oak_leaves",
+        "texture_strip": "textures/oak_leaves_strip.png"
+      }
+    ]
+  }
