@@ -451,21 +451,23 @@ int getBlockAtForMesh(int wx, int wy, int wz);
 
 // === НОВАЯ ФУНКЦИЯ КОЛЛИЗИИ ===
 bool isColliding(glm::vec3 pos) {
+    // Кубы в мире центрированы в целых координатах и занимают диапазон [n-0.5, n+0.5].
+    // Поэтому для пересечения AABB игрока с блок-сеткой используем сдвиг +0.5 перед floor().
     constexpr float EPS = 0.001f;
     float halfW = playerWidth / 2.0f;
-    int minX = (int)std::floor(pos.x - halfW + EPS);
-    int maxX = (int)std::floor(pos.x + halfW - EPS);
-    int minY = (int)std::floor(pos.y + EPS);
-    int maxY = (int)std::floor(pos.y + playerHeight - EPS);
-    int minZ = (int)std::floor(pos.z - halfW + EPS);
-    int maxZ = (int)std::floor(pos.z + halfW - EPS);
+
+    int minX = (int)std::floor((pos.x - halfW + EPS) + 0.5f);
+    int maxX = (int)std::floor((pos.x + halfW - EPS) + 0.5f);
+    int minY = (int)std::floor((pos.y + EPS) + 0.5f);
+    int maxY = (int)std::floor((pos.y + playerHeight - EPS) + 0.5f);
+    int minZ = (int)std::floor((pos.z - halfW + EPS) + 0.5f);
+    int maxZ = (int)std::floor((pos.z + halfW - EPS) + 0.5f);
 
     for (int x = minX; x <= maxX; ++x) {
         for (int y = minY; y <= maxY; ++y) {
             for (int z = minZ; z <= maxZ; ++z) {
                 int block = getBlockAtForCollision(x, y, z);
-                if (block == BLOCK_UNKNOWN || (block != 0 && block != 5))
-                    return true;
+                if (block == BLOCK_UNKNOWN || (block != 0 && block != 5)) return true;
             }
         }
     }
@@ -958,32 +960,48 @@ void setBlockAt(int wx, int wy, int wz, int type) {
 void updateChunksAroundCamera(const glm::vec3& camPos) {
     int centerCX = (int)std::floor(camPos.x / CHUNK_SIZE_X);
     int centerCZ = (int)std::floor(camPos.z / CHUNK_SIZE_Z);
-    const int RENDER_RADIUS = 20;
-    const int LOAD_RADIUS = 24;
+    const int LOAD_RADIUS = 10;
 
-    std::unordered_set<glm::ivec2, hash_ivec2> neededForLoad;
-    for (int dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; ++dx)
-        for (int dz = -LOAD_RADIUS; dz <= LOAD_RADIUS; ++dz)
-            neededForLoad.insert({centerCX + dx, centerCZ + dz});
+    static bool chunkWindowInitialized = false;
+    static int lastCenterCX = 0;
+    static int lastCenterCZ = 0;
 
     bool changed = false;
-    for (auto it = loadedChunks.begin(); it != loadedChunks.end(); ) {
-        if (neededForLoad.find(it->first) == neededForLoad.end()) {
-            it->second.saveAsync();
-            for (auto& p : it->second.vaoPerType) {
-                glDeleteVertexArrays(1, &p.second);
-                glDeleteBuffers(1, &it->second.vboPerType[p.first]);
+    if (!chunkWindowInitialized || centerCX != lastCenterCX || centerCZ != lastCenterCZ) {
+        chunkWindowInitialized = true;
+        lastCenterCX = centerCX;
+        lastCenterCZ = centerCZ;
+
+        std::unordered_set<glm::ivec2, hash_ivec2> neededForLoad;
+        neededForLoad.reserve((LOAD_RADIUS * 2 + 1) * (LOAD_RADIUS * 2 + 1));
+        for (int dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; ++dx) {
+            for (int dz = -LOAD_RADIUS; dz <= LOAD_RADIUS; ++dz) {
+                neededForLoad.insert({centerCX + dx, centerCZ + dz});
             }
-            it = loadedChunks.erase(it);
-            changed = true;
-        } else ++it;
-    }
-    for (const auto& key : neededForLoad) {
-        if (loadedChunks.find(key) == loadedChunks.end()) {
-            loadedChunks.emplace(std::piecewise_construct, std::forward_as_tuple(key.x, key.y), std::forward_as_tuple(key.x, key.y));
-            changed = true;
+        }
+
+        for (auto it = loadedChunks.begin(); it != loadedChunks.end();) {
+            if (neededForLoad.find(it->first) == neededForLoad.end()) {
+                it->second.saveAsync();
+                for (auto& p : it->second.vaoPerType) {
+                    glDeleteVertexArrays(1, &p.second);
+                    glDeleteBuffers(1, &it->second.vboPerType[p.first]);
+                }
+                it = loadedChunks.erase(it);
+                changed = true;
+            } else {
+                ++it;
+            }
+        }
+
+        for (const auto& key : neededForLoad) {
+            if (loadedChunks.find(key) == loadedChunks.end()) {
+                loadedChunks.emplace(std::piecewise_construct, std::forward_as_tuple(key.x, key.y), std::forward_as_tuple(key.x, key.y));
+                changed = true;
+            }
         }
     }
+
     for (auto& pair : loadedChunks) pair.second.updateData();
     if (changed) waterChunksCacheValid = false;
 }
@@ -1175,7 +1193,8 @@ void resetPlayer() {
     float temp, humid, waterLevel;
     float groundY = getHeightAt(0, 0, temp, humid, waterLevel);
     if (groundY < waterLevel + 1.0f) groundY = waterLevel + 1.0f;
-    playerPos = glm::vec3(0.0f, groundY + 1.0f, 0.0f);
+    // Стопы игрока должны стоять на верхней грани блока (y + 0.5).
+    playerPos = glm::vec3(0.0f, groundY + 0.501f, 0.0f);
     velocityY = 0.0f;
     onGround = true;
     cameraPos = playerPos + glm::vec3(0.0f, eyeHeight, 0.0f);
@@ -1553,7 +1572,16 @@ int main() {
             glUniformMatrix4fv(u_viewLoc,1,GL_FALSE,glm::value_ptr(view));
             glUniformMatrix4fv(u_projLoc,1,GL_FALSE,glm::value_ptr(projection));
             glUniform1f(u_time_location, now);
-            for (auto& pair : loadedChunks) pair.second.render();
+            const int centerCX = (int)std::floor(cameraPos.x / CHUNK_SIZE_X);
+            const int centerCZ = (int)std::floor(cameraPos.z / CHUNK_SIZE_Z);
+            const int RENDER_RADIUS = 8;
+            for (auto& pair : loadedChunks) {
+                int dx = pair.first.x - centerCX;
+                int dz = pair.first.y - centerCZ;
+                if (std::abs(dx) <= RENDER_RADIUS && std::abs(dz) <= RENDER_RADIUS) {
+                    pair.second.render();
+                }
+            }
             updateWaterChunksCache();
             if (glm::distance(cameraPos, lastCameraPosForWaterSort) > 0.5f) {
                 std::sort(waterChunksCache.begin(), waterChunksCache.end(),
