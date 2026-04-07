@@ -446,6 +446,7 @@ void workerFunction() {
 // Прототипы
 int getBlockAt(int wx, int wy, int wz);
 int getBlockAtForCollision(int wx, int wy, int wz);
+int getBlockAtCollision(int wx, int wy, int wz); // alias для совместимости
 void setBlockAt(int wx, int wy, int wz, int type);
 int getBlockAtForMesh(int wx, int wy, int wz);
 
@@ -924,6 +925,10 @@ int getBlockAtForCollision(int wx, int wy, int wz) {
     int lx = wx - cx * CHUNK_SIZE_X;
     int lz = wz - cz * CHUNK_SIZE_Z;
     return it->second.getLocalBlock(lx, wy, lz);
+}
+
+int getBlockAtCollision(int wx, int wy, int wz) {
+    return getBlockAtForCollision(wx, wy, wz);
 }
 
 void setBlockAt(int wx, int wy, int wz, int type) {
