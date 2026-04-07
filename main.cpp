@@ -50,7 +50,7 @@ const unsigned int SCR_WIDTH = 1280;
 const unsigned int SCR_HEIGHT = 720;
 const int BLOCK_UNKNOWN = -1;
 
-// Параметры игрока (физика) - ИСПРАВЛЕНО
+// Параметры игрока (физика) - исправлено: камера по центру хитбокса
 glm::vec3 playerPos;           // позиция ног (центр по X/Z)
 glm::vec3 cameraPos;           // позиция камеры (глаза)
 glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
@@ -61,20 +61,25 @@ float pitch =  0.0f;
 float lastX = SCR_WIDTH / 2.0f;
 float lastY = SCR_HEIGHT / 2.0f;
 bool firstMouse = true;
+bool ignoreMouseEvent = false;
 float deltaTime = 0.0f;
 float lastFrame = 0.0f;
 
-// Физика (новая)
-float playerWidth  = 0.6f;
-float playerHeight = 1.8f;
+// Физика игрока:
+// - ширина коллизии: 0.3 блока (по 0.35 блока отступа с каждой стороны при стоянии по центру блока)
+// - высота коллизии: 1.9 блока
+// - камера всегда по центру тела по X/Z
+float playerWidth  = 0.3f;
+float playerHeight = 1.9f;
 float eyeHeight    = 1.62f;
 float velocityY    = 0.0f;
 bool onGround      = true;
-float gravity      = 32.0f;
-float jumpSpeed    = 9.0f;
-float walkSpeed    = 4.317f;
-float sprintSpeed  = 5.612f;
+float gravity      = 20.0f;
+float jumpSpeed    = 7.0f;
+float walkSpeed    = 4.5f;
+float sprintSpeed  = 7.0f;
 float currentSpeed = walkSpeed;
+bool jumpRequested = false;
 
 // Типы блоков
 struct BlockType {
@@ -194,11 +199,11 @@ void initWorldNoise() {
     treeNoise.SetFrequency(0.08f);
 
     seaLevelNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+    seaLevelNoise.SetFrequency(0.0003f);
     seaLevelNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
     seaLevelNoise.SetFractalOctaves(4);
     seaLevelNoise.SetFractalLacunarity(2.0f);
     seaLevelNoise.SetFractalGain(0.5f);
-    seaLevelNoise.SetFrequency(0.0003f);
 
     transitionNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
     transitionNoise.SetFrequency(0.002f);
@@ -680,12 +685,6 @@ void updateMusic() {
     }
 }
 
-// ========== ИНВЕНТАРЬ (прямая отрисовка) ==========
-bool inventoryOpen = false;
-unsigned int inventoryTexture = 0;
-int invWidth = 0, invHeight = 0;
-float invScale = 1.2f;
-
 // Структура чанка (рендер)
 struct Chunk {
     glm::ivec2 pos;
@@ -1051,59 +1050,144 @@ bool loadBlockConfig(const std::string& path) {
     return !blockTypes.empty();
 }
 
-// ========== ИСПРАВЛЕННЫЙ RAYCAST ==========
+// RayCast
 bool rayCast(glm::vec3 origin, glm::vec3 direction, int& hitX, int& hitY, int& hitZ, int& faceHit, float maxDistance) {
     direction = glm::normalize(direction);
-    glm::vec3 pos = origin;
-    glm::vec3 step;
-    step.x = (direction.x > 0) ? 1.0f : (direction.x < 0) ? -1.0f : 0.0f;
-    step.y = (direction.y > 0) ? 1.0f : (direction.y < 0) ? -1.0f : 0.0f;
-    step.z = (direction.z > 0) ? 1.0f : (direction.z < 0) ? -1.0f : 0.0f;
-
-    glm::vec3 tDelta;
-    tDelta.x = (direction.x != 0) ? fabs(1.0f / direction.x) : INFINITY;
-    tDelta.y = (direction.y != 0) ? fabs(1.0f / direction.y) : INFINITY;
-    tDelta.z = (direction.z != 0) ? fabs(1.0f / direction.z) : INFINITY;
-
-    glm::vec3 tMax;
-    tMax.x = (step.x > 0) ? ((std::floor(pos.x) + 1 - pos.x) / direction.x) : ((pos.x - std::floor(pos.x)) / -direction.x);
-    tMax.y = (step.y > 0) ? ((std::floor(pos.y) + 1 - pos.y) / direction.y) : ((pos.y - std::floor(pos.y)) / -direction.y);
-    tMax.z = (step.z > 0) ? ((std::floor(pos.z) + 1 - pos.z) / direction.z) : ((pos.z - std::floor(pos.z)) / -direction.z);
-    if (std::isnan(tMax.x)) tMax.x = INFINITY;
-    if (std::isnan(tMax.y)) tMax.y = INFINITY;
-    if (std::isnan(tMax.z)) tMax.z = INFINITY;
-
-    int ix = (int)std::floor(pos.x);
-    int iy = (int)std::floor(pos.y);
-    int iz = (int)std::floor(pos.z);
-    const int maxSteps = 200;
-    for (int i = 0; i < maxSteps; ++i) {
-        int block = getBlockAt(ix, iy, iz);
+    glm::ivec3 pos((int)std::floor(origin.x+0.5f), (int)std::floor(origin.y+0.5f), (int)std::floor(origin.z+0.5f));
+    glm::ivec3 step;
+    step.x = (direction.x>0)?1:(direction.x<0)?-1:0;
+    step.y = (direction.y>0)?1:(direction.y<0)?-1:0;
+    step.z = (direction.z>0)?1:(direction.z<0)?-1:0;
+    float tDeltaX = (direction.x!=0)?fabs(1.0f/direction.x):INFINITY;
+    float tDeltaY = (direction.y!=0)?fabs(1.0f/direction.y):INFINITY;
+    float tDeltaZ = (direction.z!=0)?fabs(1.0f/direction.z):INFINITY;
+    float tMaxX, tMaxY, tMaxZ;
+    if (direction.x>0) tMaxX = ((pos.x+0.5f)-origin.x)/direction.x;
+    else if (direction.x<0) tMaxX = ((pos.x-0.5f)-origin.x)/direction.x;
+    else tMaxX = INFINITY;
+    if (direction.y>0) tMaxY = ((pos.y+0.5f)-origin.y)/direction.y;
+    else if (direction.y<0) tMaxY = ((pos.y-0.5f)-origin.y)/direction.y;
+    else tMaxY = INFINITY;
+    if (direction.z>0) tMaxZ = ((pos.z+0.5f)-origin.z)/direction.z;
+    else if (direction.z<0) tMaxZ = ((pos.z-0.5f)-origin.z)/direction.z;
+    else tMaxZ = INFINITY;
+    const int MAX_STEPS = 200;
+    for (int i=0; i<MAX_STEPS; ++i) {
+        int block = getBlockAt(pos.x, pos.y, pos.z);
         if (block != 0 && block != 5) {
-            hitX = ix; hitY = iy; hitZ = iz;
+            hitX = pos.x; hitY = pos.y; hitZ = pos.z;
             return true;
         }
-        if (tMax.x < tMax.y && tMax.x < tMax.z) {
-            if (tMax.x > maxDistance) break;
-            ix += (int)step.x;
-            faceHit = (step.x > 0) ? 0 : 1;
-            tMax.x += tDelta.x;
-        } else if (tMax.y < tMax.x && tMax.y < tMax.z) {
-            if (tMax.y > maxDistance) break;
-            iy += (int)step.y;
-            faceHit = (step.y > 0) ? 2 : 3;
-            tMax.y += tDelta.y;
+        if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+            if (tMaxX > maxDistance) break;
+            pos.x += step.x;
+            faceHit = (direction.x>0)?1:0;
+            tMaxX += tDeltaX;
+        } else if (tMaxY <= tMaxX && tMaxY <= tMaxZ) {
+            if (tMaxY > maxDistance) break;
+            pos.y += step.y;
+            faceHit = (direction.y>0)?3:2;
+            tMaxY += tDeltaY;
         } else {
-            if (tMax.z > maxDistance) break;
-            iz += (int)step.z;
-            faceHit = (step.z > 0) ? 4 : 5;
-            tMax.z += tDelta.z;
+            if (tMaxZ > maxDistance) break;
+            pos.z += step.z;
+            faceHit = (direction.z>0)?5:4;
+            tMaxZ += tDeltaZ;
         }
     }
     return false;
 }
 
-// ========== НОВАЯ ФИЗИКА И КОЛЛИЗИЯ ==========
+// ФИЗИКА И КОЛЛИЗИИ (исправлено: камера по центру, точная коллизия)
+inline bool isSolidBlock(int id) {
+    return id != 0 && id != 5;
+}
+
+void getPlayerAABB(const glm::vec3& pos, glm::vec3& outMin, glm::vec3& outMax) {
+    outMin = glm::vec3(pos.x - playerWidth/2.0f, pos.y, pos.z - playerWidth/2.0f);
+    outMax = glm::vec3(pos.x + playerWidth/2.0f, pos.y + playerHeight, pos.z + playerWidth/2.0f);
+}
+
+// Проверка коллизий с точной границей
+bool checkCollision(const glm::vec3& aabbMin, const glm::vec3& aabbMax) {
+    int minX = (int)std::floor(aabbMin.x);
+    int maxX = (int)std::floor(aabbMax.x - 1e-6f);
+    int minY = (int)std::floor(aabbMin.y);
+    int maxY = (int)std::floor(aabbMax.y - 1e-6f);
+    int minZ = (int)std::floor(aabbMin.z);
+    int maxZ = (int)std::floor(aabbMax.z - 1e-6f);
+    for (int x = minX; x <= maxX; ++x) {
+        for (int y = minY; y <= maxY; ++y) {
+            for (int z = minZ; z <= maxZ; ++z) {
+                int block = getBlockAtCollision(x, y, z);
+                if (isSolidBlock(block)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool intersectsSolidBlockAABB(const glm::vec3& playerMin, const glm::vec3& playerMax, int bx, int by, int bz) {
+    const glm::vec3 blockMin((float)bx - 0.5f, (float)by - 0.5f, (float)bz - 0.5f);
+    const glm::vec3 blockMax((float)bx + 0.5f, (float)by + 0.5f, (float)bz + 0.5f);
+    const bool overlapX = (playerMin.x < blockMax.x) && (playerMax.x > blockMin.x);
+    const bool overlapY = (playerMin.y < blockMax.y) && (playerMax.y > blockMin.y);
+    const bool overlapZ = (playerMin.z < blockMax.z) && (playerMax.z > blockMin.z);
+    return overlapX && overlapY && overlapZ;
+}
+
+// Корректировка позиции по одной оси (исправлено)
+bool adjustAxis(glm::vec3& pos, float delta, int axis, const glm::vec3& aabbMin, const glm::vec3& aabbMax) {
+    if (delta == 0.0f) return false;
+    glm::vec3 newMin = aabbMin;
+    glm::vec3 newMax = aabbMax;
+    const float epsilon = 1e-5f;
+    if (axis == 0) { // X
+        newMin.x += delta;
+        newMax.x += delta;
+        if (!checkCollision(newMin, newMax)) {
+            pos.x += delta;
+            return false;
+        } else {
+            if (delta > 0) {
+                pos.x = std::floor(aabbMax.x + delta - epsilon) - playerWidth/2.0f;
+            } else {
+                pos.x = std::ceil(aabbMin.x + delta + epsilon) + playerWidth/2.0f;
+            }
+            return true;
+        }
+    } else if (axis == 1) { // Y
+        newMin.y += delta;
+        newMax.y += delta;
+        if (!checkCollision(newMin, newMax)) {
+            pos.y += delta;
+            return false;
+        } else {
+            if (delta > 0) {
+                pos.y = std::floor(aabbMax.y + delta - epsilon) - playerHeight;
+            } else {
+                pos.y = std::ceil(aabbMin.y + delta + epsilon);
+            }
+            return true;
+        }
+    } else if (axis == 2) { // Z
+        newMin.z += delta;
+        newMax.z += delta;
+        if (!checkCollision(newMin, newMax)) {
+            pos.z += delta;
+            return false;
+        } else {
+            if (delta > 0) {
+                pos.z = std::floor(aabbMax.z + delta - epsilon) - playerWidth/2.0f;
+            } else {
+                pos.z = std::ceil(aabbMin.z + delta + epsilon) + playerWidth/2.0f;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
 void updatePlayer(float dt) {
     if (dt > 0.05f) dt = 0.05f;
 
@@ -1145,6 +1229,8 @@ void resetPlayer() {
     yaw = -90.0f;
     pitch = 0.0f;
     cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
+    firstMouse = true;
+    ignoreMouseEvent = false;
 }
 
 // Обработка мыши и клавиатуры
@@ -1153,7 +1239,6 @@ bool loadingInProgress = false;
 double mouseX = 0, mouseY = 0;
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
-    if (inventoryOpen) return;
     if ((!gameStarted && !loadingInProgress) && button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
         int w,h; glfwGetWindowSize(window,&w,&h);
         for (int i=0; i<3; ++i) {
@@ -1184,44 +1269,19 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 case 5: newZ=hitZ-1; break;
             }
             if (getBlockAt(newX,newY,newZ) != 0 && getBlockAt(newX,newY,newZ) != 5) return;
+
+            // Нельзя ставить блок внутрь хитбокса игрока: это ломает движение/ломание блоков.
+            glm::vec3 playerMin, playerMax;
+            getPlayerAABB(playerPos, playerMin, playerMax);
+            if (intersectsSolidBlockAABB(playerMin, playerMax, newX, newY, newZ)) return;
+
             setBlockAt(newX,newY,newZ, currentBlockType);
         }
     }
 }
 
 void processInput(GLFWwindow *window) {
-    static bool eWasPressed = false;
-    static bool escWasPressed = false;
-    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS && !eWasPressed) {
-        eWasPressed = true;
-        if (gameStarted) {
-            if (!inventoryOpen) {
-                inventoryOpen = true;
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-                firstMouse = true;
-            } else {
-                inventoryOpen = false;
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-                firstMouse = true;
-            }
-        }
-    } else if (glfwGetKey(window, GLFW_KEY_E) == GLFW_RELEASE) {
-        eWasPressed = false;
-    }
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS && !escWasPressed) {
-        escWasPressed = true;
-        if (gameStarted && inventoryOpen) {
-            inventoryOpen = false;
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-            firstMouse = true;
-        }
-    } else if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_RELEASE) {
-        escWasPressed = false;
-    }
-
     if (!gameStarted) return;
-    if (inventoryOpen) return;
-
     for (int i=1; i<=9; ++i) {
         if (glfwGetKey(window, GLFW_KEY_0 + i) == GLFW_PRESS) {
             if (blockTypes.find(i) != blockTypes.end()) currentBlockType = i;
@@ -1335,15 +1395,33 @@ int main() {
     glfwSetWindowPos(window, 0, 0);
     glfwMakeContextCurrent(window);
     glfwSetFramebufferSizeCallback(window, [](GLFWwindow*, int w, int h) { glViewport(0, 0, w, h); });
-    glfwSetCursorPosCallback(window, [](GLFWwindow*, double x, double y) {
+    glfwSetCursorPosCallback(window, [](GLFWwindow* win, double x, double y) {
         mouseX = x; mouseY = y;
         if (!gameStarted) return;
-        if (inventoryOpen) return;
-        static bool first = true;
-        if (first) { lastX = x; lastY = y; first = false; }
-        float xoffset = x - lastX;
-        float yoffset = lastY - y;
-        lastX = x; lastY = y;
+        if (ignoreMouseEvent) { ignoreMouseEvent = false; return; }
+
+        int ww = 0, wh = 0;
+        glfwGetWindowSize(win, &ww, &wh);
+        double centerX = ww * 0.5;
+        double centerY = wh * 0.5;
+
+        if (firstMouse) {
+            lastX = static_cast<float>(centerX);
+            lastY = static_cast<float>(centerY);
+            ignoreMouseEvent = true;
+            glfwSetCursorPos(win, centerX, centerY);
+            firstMouse = false;
+            return;
+        }
+
+        float xoffset = static_cast<float>(x - centerX);
+        float yoffset = static_cast<float>(centerY - y);
+
+        ignoreMouseEvent = true;
+        glfwSetCursorPos(win, centerX, centerY);
+        lastX = static_cast<float>(centerX);
+        lastY = static_cast<float>(centerY);
+
         const float sensitivity = 0.1f;
         xoffset *= sensitivity; yoffset *= sensitivity;
         yaw += xoffset; pitch += yoffset;
@@ -1381,25 +1459,6 @@ int main() {
     u_projLoc = glGetUniformLocation(shaderProgram, "projection");
 
     if (!loadBlockConfig("blocks.json")) { std::cerr << "Failed to load block config\n"; return -1; }
-
-    // Загрузка текстуры инвентаря
-    {
-        int w, h, ch;
-        unsigned char* data = stbi_load("textures/inventory.png", &w, &h, &ch, 4);
-        if (data) {
-            glGenTextures(1, &inventoryTexture);
-            glBindTexture(GL_TEXTURE_2D, inventoryTexture);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-            invWidth = w;
-            invHeight = h;
-            stbi_image_free(data);
-            std::cout << "Loaded inventory texture: " << invWidth << "x" << invHeight << std::endl;
-        } else {
-            std::cerr << "Failed to load inventory texture: textures/inventory.png" << std::endl;
-        }
-    }
 
     // ImGui
     IMGUI_CHECKVERSION();
@@ -1491,6 +1550,12 @@ int main() {
                 if (allReady) {
                     gameStarted = true;
                     loadingInProgress = false;
+                    int ww = 0, wh = 0;
+                    glfwGetWindowSize(window, &ww, &wh);
+                    lastX = ww * 0.5f;
+                    lastY = wh * 0.5f;
+                    firstMouse = true;
+                    ignoreMouseEvent = false;
                     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
                     initReticle();
                     startMusic();
@@ -1500,16 +1565,14 @@ int main() {
             }
         } else {
             processInput(window);
-            if (!inventoryOpen) {
-                updatePlayer(deltaTime);
-            }
+            updatePlayer(deltaTime);
             updateMusic();
             updateChunksAroundCamera(cameraPos);
             glClearColor(0.53f, 0.81f, 0.92f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glm::mat4 model = glm::mat4(1.0f);
             glm::mat4 view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
-            int w,h; glfwGetWindowSize(window,&w,&h);
+            int w,h; glfwGetFramebufferSize(window,&w,&h);
             glm::mat4 projection = glm::perspective(glm::radians(65.0f), (float)w/(float)h, 0.1f, 1000.0f);
             glUseProgram(shaderProgram);
             glUniformMatrix4fv(u_modelLoc,1,GL_FALSE,glm::value_ptr(model));
@@ -1529,35 +1592,15 @@ int main() {
             }
             for (Chunk* chunk : waterChunksCache) chunk->renderWater();
 
-            // Отрисовка инвентаря
-            if (inventoryOpen && inventoryTexture) {
-                glDisable(GL_DEPTH_TEST);
-                glDisable(GL_CULL_FACE);
-                drawRectangle(0, 0, w, h, 0, w, h);
-                float invW = invWidth * invScale;
-                float invH = invHeight * invScale;
-                float invX = (w - invW) / 2.0f;
-                float invY = (h - invH) / 2.0f;
-                drawRectangle(invX, invY, invW, invH, inventoryTexture, w, h);
-                glEnable(GL_DEPTH_TEST);
-                glEnable(GL_CULL_FACE);
-            }
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_CULL_FACE);
+            glUseProgram(reticleProgram);
+            glBindVertexArray(reticleVAO);
+            glDrawArrays(GL_POINTS, 0, 1);
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_CULL_FACE);
 
-            // Прицел
-            if (!inventoryOpen) {
-                glDisable(GL_DEPTH_TEST);
-                glDisable(GL_CULL_FACE);
-                glUseProgram(reticleProgram);
-                glBindVertexArray(reticleVAO);
-                glDrawArrays(GL_POINTS, 0, 1);
-                glEnable(GL_DEPTH_TEST);
-                glEnable(GL_CULL_FACE);
-            }
-
-            // ImGui отладка
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplGlfw_NewFrame();
-            ImGui::NewFrame();
+            ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
             ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
             ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
             ImGui::Text("Chunks: %zu", loadedChunks.size());
@@ -1566,7 +1609,8 @@ int main() {
             ImGui::Text("Mode: Free camera (WASD + Space/C)");
             if (ImGui::Button("Exit to Menu")) {
                 gameStarted = false;
-                inventoryOpen = false;
+                firstMouse = true;
+                ignoreMouseEvent = false;
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
                 for (auto& pair : loadedChunks) {
                     for (auto& p : pair.second.vaoPerType) {
@@ -1574,8 +1618,7 @@ int main() {
                         glDeleteBuffers(1, &pair.second.vboPerType[p.first]);
                     }
                 }
-                loadedChunks.clear();
-                waterChunksCacheValid = false;
+                loadedChunks.clear(); waterChunksCacheValid = false;
                 workerRunning = false;
                 if (workerThread.joinable()) workerThread.join();
                 {
@@ -1590,9 +1633,7 @@ int main() {
                 loadingInProgress = false;
                 workerRunning = true;
             }
-            ImGui::End();
-            ImGui::Render();
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -1612,7 +1653,6 @@ int main() {
     stopMusic();
     if (menuBackgroundTexture) glDeleteTextures(1, &menuBackgroundTexture);
     if (menuButtonTexture) glDeleteTextures(1, &menuButtonTexture);
-    if (inventoryTexture) glDeleteTextures(1, &inventoryTexture);
     glDeleteVertexArrays(1, &uiVAO); glDeleteBuffers(1, &uiVBO); glDeleteBuffers(1, &uiEBO); glDeleteProgram(uiShaderProgram);
     ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplGlfw_Shutdown(); ImGui::DestroyContext();
     for (auto& p : blockTypes) glDeleteTextures(1, &p.second.textureID);
