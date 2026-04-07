@@ -446,9 +446,36 @@ void workerFunction() {
 
 // Прототипы
 int getBlockAt(int wx, int wy, int wz);
+int getBlockAtForCollision(int wx, int wy, int wz);
 void setBlockAt(int wx, int wy, int wz, int type);
 int getBlockAtForMesh(int wx, int wy, int wz);
 
+<<<<<<< HEAD
+=======
+// === НОВАЯ ФУНКЦИЯ КОЛЛИЗИИ ===
+bool isColliding(glm::vec3 pos) {
+    constexpr float EPS = 0.001f;
+    float halfW = playerWidth / 2.0f;
+    int minX = (int)std::floor(pos.x - halfW + EPS);
+    int maxX = (int)std::floor(pos.x + halfW - EPS);
+    int minY = (int)std::floor(pos.y + EPS);
+    int maxY = (int)std::floor(pos.y + playerHeight - EPS);
+    int minZ = (int)std::floor(pos.z - halfW + EPS);
+    int maxZ = (int)std::floor(pos.z + halfW - EPS);
+
+    for (int x = minX; x <= maxX; ++x) {
+        for (int y = minY; y <= maxY; ++y) {
+            for (int z = minZ; z <= maxZ; ++z) {
+                int block = getBlockAtForCollision(x, y, z);
+                if (block == BLOCK_UNKNOWN || (block != 0 && block != 5))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+>>>>>>> 12f896e36d81168088d2ea979c0b5d2c781e151b
 // Шейдерные переменные
 unsigned int shaderProgram, reticleProgram, reticleVAO;
 int u_time_location;
@@ -886,6 +913,7 @@ int getBlockAt(int wx, int wy, int wz) {
     return it->second.getLocalBlock(lx, wy, lz);
 }
 
+<<<<<<< HEAD
 // Функция для коллизий: незагруженные чанки считаем воздухом (0)
 int getBlockAtCollision(int wx, int wy, int wz) {
     if (wy < 0 || wy >= CHUNK_SIZE_Y) return 0;
@@ -896,6 +924,16 @@ int getBlockAtCollision(int wx, int wy, int wz) {
     int lx = wx - cx * CHUNK_SIZE_X;
     int lz = wz - cz * CHUNK_SIZE_Z;
     if (lx < 0 || lx >= CHUNK_SIZE_X || lz < 0 || lz >= CHUNK_SIZE_Z) return 0;
+=======
+int getBlockAtForCollision(int wx, int wy, int wz) {
+    if (wy < 0 || wy >= CHUNK_SIZE_Y) return BLOCK_UNKNOWN;
+    int cx = (wx >= 0) ? wx / CHUNK_SIZE_X : (wx - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
+    int cz = (wz >= 0) ? wz / CHUNK_SIZE_Z : (wz - CHUNK_SIZE_Z + 1) / CHUNK_SIZE_Z;
+    auto it = loadedChunks.find({cx, cz});
+    if (it == loadedChunks.end()) return BLOCK_UNKNOWN;
+    int lx = wx - cx * CHUNK_SIZE_X;
+    int lz = wz - cz * CHUNK_SIZE_Z;
+>>>>>>> 12f896e36d81168088d2ea979c0b5d2c781e151b
     return it->second.getLocalBlock(lx, wy, lz);
 }
 
@@ -1151,6 +1189,7 @@ bool adjustAxis(glm::vec3& pos, float delta, int axis, const glm::vec3& aabbMin,
 void updatePlayer(float dt) {
     if (dt > 0.05f) dt = 0.05f;
 
+<<<<<<< HEAD
     // Спринт
     if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
         currentSpeed = sprintSpeed;
@@ -1158,12 +1197,19 @@ void updatePlayer(float dt) {
         currentSpeed = walkSpeed;
 
     // Горизонтальное направление
+=======
+    currentSpeed = (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) ? sprintSpeed : walkSpeed;
+
+    glm::vec3 forward = glm::normalize(glm::vec3(cameraFront.x, 0.0f, cameraFront.z));
+    glm::vec3 right = glm::normalize(glm::cross(forward, cameraUp));
+>>>>>>> 12f896e36d81168088d2ea979c0b5d2c781e151b
     glm::vec3 moveDir(0.0f);
     if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_W) == GLFW_PRESS) moveDir += cameraFront;
     if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_S) == GLFW_PRESS) moveDir -= cameraFront;
     if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_A) == GLFW_PRESS) moveDir -= glm::normalize(glm::cross(cameraFront, cameraUp));
     if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_D) == GLFW_PRESS) moveDir += glm::normalize(glm::cross(cameraFront, cameraUp));
     if (glm::length(moveDir) > 0.1f) moveDir = glm::normalize(moveDir);
+<<<<<<< HEAD
     moveDir.y = 0.0f;
 
     glm::vec3 desiredMove = moveDir * currentSpeed * dt;
@@ -1232,6 +1278,63 @@ void updatePlayer(float dt) {
     }
 
     // Установка камеры: строго по центру X/Z и на высоте eyeHeight от ног
+=======
+
+    static bool spacePressed = false;
+    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_SPACE) == GLFW_PRESS) {
+        if (onGround && !spacePressed) {
+            velocityY = jumpSpeed;
+            onGround = false;
+        }
+        spacePressed = true;
+    } else {
+        spacePressed = false;
+    }
+
+    velocityY -= gravity * dt;
+
+    glm::vec3 desiredMove = glm::vec3(moveDir.x, 0.0f, moveDir.z) * currentSpeed * dt;
+    glm::vec3 frameMove(desiredMove.x, velocityY * dt, desiredMove.z);
+
+    float maxComp = std::max({std::abs(frameMove.x), std::abs(frameMove.y), std::abs(frameMove.z)});
+    int steps = std::max(1, (int)std::ceil(maxComp / 0.05f));
+    glm::vec3 stepMove = frameMove / (float)steps;
+
+    for (int i = 0; i < steps; ++i) {
+        glm::vec3 testPos = playerPos;
+
+        if (stepMove.x != 0.0f) {
+            testPos.x += stepMove.x;
+            if (!isColliding(testPos)) {
+                playerPos.x = testPos.x;
+            }
+            testPos = playerPos;
+        }
+
+        if (stepMove.z != 0.0f) {
+            testPos.z += stepMove.z;
+            if (!isColliding(testPos)) {
+                playerPos.z = testPos.z;
+            }
+            testPos = playerPos;
+        }
+
+        if (stepMove.y != 0.0f) {
+            testPos.y += stepMove.y;
+            if (!isColliding(testPos)) {
+                playerPos.y = testPos.y;
+            } else {
+                if (stepMove.y < 0.0f) onGround = true;
+                velocityY = 0.0f;
+            }
+        }
+    }
+
+    glm::vec3 footCheck = playerPos;
+    footCheck.y -= 0.05f;
+    onGround = isColliding(footCheck);
+
+>>>>>>> 12f896e36d81168088d2ea979c0b5d2c781e151b
     cameraPos = playerPos + glm::vec3(0.0f, eyeHeight, 0.0f);
 }
 
