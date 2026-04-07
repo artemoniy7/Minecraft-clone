@@ -480,6 +480,8 @@ bool isColliding(glm::vec3 pos) {
 
 // Шейдерные переменные
 unsigned int shaderProgram, reticleProgram, reticleVAO;
+unsigned int prismVAO = 0, prismVBO = 0;
+glm::vec3 prismPos(4.0f, 0.0f, 4.0f); // позиция ног центра (как у игрока)
 int u_time_location;
 int u_isWater_location;
 
@@ -496,6 +498,54 @@ static glm::ivec2 lastChunkCoordsForMesh(0,0);
 static GLint u_modelLoc = -1;
 static GLint u_viewLoc = -1;
 static GLint u_projLoc = -1;
+
+static void initPrismMesh() {
+    const float v[] = {
+        // back
+        0,0,0, 0,0,  1,1,0, 1,1,  1,0,0, 1,0,
+        0,0,0, 0,0,  0,1,0, 0,1,  1,1,0, 1,1,
+        // front
+        0,0,1, 0,0,  1,0,1, 1,0,  1,1,1, 1,1,
+        0,0,1, 0,0,  1,1,1, 1,1,  0,1,1, 0,1,
+        // left
+        0,0,0, 0,0,  0,0,1, 1,0,  0,1,1, 1,1,
+        0,0,0, 0,0,  0,1,1, 1,1,  0,1,0, 0,1,
+        // right
+        1,0,0, 0,0,  1,1,1, 1,1,  1,0,1, 1,0,
+        1,0,0, 0,0,  1,1,0, 0,1,  1,1,1, 1,1,
+        // bottom
+        0,0,0, 0,0,  1,0,1, 1,1,  1,0,0, 1,0,
+        0,0,0, 0,0,  0,0,1, 0,1,  1,0,1, 1,1,
+        // top
+        0,1,0, 0,0,  1,1,0, 1,0,  1,1,1, 1,1,
+        0,1,0, 0,0,  1,1,1, 1,1,  0,1,1, 0,1
+    };
+    glGenVertexArrays(1, &prismVAO);
+    glGenBuffers(1, &prismVBO);
+    glBindVertexArray(prismVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, prismVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glBindVertexArray(0);
+}
+
+static void renderPlayerSizedPrism() {
+    if (!prismVAO) return;
+    glm::mat4 prismModel = glm::mat4(1.0f);
+    prismModel = glm::translate(prismModel, glm::vec3(prismPos.x - 0.3f, prismPos.y, prismPos.z - 0.3f));
+    prismModel = glm::scale(prismModel, glm::vec3(0.6f, 1.8f, 0.6f));
+    glUniformMatrix4fv(u_modelLoc, 1, GL_FALSE, glm::value_ptr(prismModel));
+    glUniform1i(u_isWater_location, 0);
+    glActiveTexture(GL_TEXTURE0);
+    unsigned int tex = blockTypes.count(1) ? blockTypes[1].textureID : 0;
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glBindVertexArray(prismVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 36);
+    glBindVertexArray(0);
+}
 
 // UI (меню)
 unsigned int uiShaderProgram;
@@ -1223,6 +1273,10 @@ void resetPlayer() {
     float groundY = getHeightAt(0, 0, temp, humid, waterLevel);
     if (groundY < waterLevel + 1.0f) groundY = waterLevel + 1.0f;
     playerPos = glm::vec3(0.0f, groundY + 1.0f, 0.0f);
+    float prismTemp, prismHumid, prismWater;
+    float prismGround = getHeightAt(4, 4, prismTemp, prismHumid, prismWater);
+    if (prismGround < prismWater + 1.0f) prismGround = prismWater + 1.0f;
+    prismPos = glm::vec3(4.0f, prismGround + 1.0f, 4.0f);
     velocityY = 0.0f;
     onGround = true;
     cameraPos = playerPos + glm::vec3(0.0f, eyeHeight, 0.0f);
@@ -1459,6 +1513,7 @@ int main() {
     u_projLoc = glGetUniformLocation(shaderProgram, "projection");
 
     if (!loadBlockConfig("blocks.json")) { std::cerr << "Failed to load block config\n"; return -1; }
+    initPrismMesh();
 
     // ImGui
     IMGUI_CHECKVERSION();
@@ -1580,6 +1635,7 @@ int main() {
             glUniformMatrix4fv(u_projLoc,1,GL_FALSE,glm::value_ptr(projection));
             glUniform1f(u_time_location, now);
             for (auto& pair : loadedChunks) pair.second.render();
+            renderPlayerSizedPrism();
             updateWaterChunksCache();
             if (glm::distance(cameraPos, lastCameraPosForWaterSort) > 0.5f) {
                 std::sort(waterChunksCache.begin(), waterChunksCache.end(),
@@ -1658,6 +1714,8 @@ int main() {
     for (auto& p : blockTypes) glDeleteTextures(1, &p.second.textureID);
     glDeleteProgram(shaderProgram);
     glDeleteVertexArrays(1, &reticleVAO); glDeleteProgram(reticleProgram);
+    if (prismVAO) glDeleteVertexArrays(1, &prismVAO);
+    if (prismVBO) glDeleteBuffers(1, &prismVBO);
     glfwTerminate();
     return 0;
 }
