@@ -1559,10 +1559,7 @@ int main() {
                 if (allReady) {
                     gameStarted = true;
                     loadingInProgress = false;
-                    double cursorX = 0.0, cursorY = 0.0;
-                    glfwGetCursorPos(window, &cursorX, &cursorY);
-                    lastX = static_cast<float>(cursorX);
-                    lastY = static_cast<float>(cursorY);
+                    glfwGetCursorPos(window, &lastX, &lastY);
                     firstMouse = true;
                     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
                     initReticle();
