@@ -136,16 +136,17 @@ bool isOnGroundCheck(const glm::vec3& feetPos) {
 glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     glm::vec3 newFeetPos = oldFeetPos;
     glm::vec3 actualDelta(0.0f);
+    constexpr float COLLISION_STEP = 0.01f;
     
     // Ось X
     newFeetPos.x += delta.x;
     if (checkPlayerCollision(newFeetPos)) {
         newFeetPos.x = oldFeetPos.x;
-        float step = (delta.x > 0.0f) ? 0.01f : -0.01f;
-        for (float t = 0.01f; t <= std::abs(delta.x); t += 0.01f) {
-            newFeetPos.x = oldFeetPos.x + step * t;
+        const float direction = (delta.x > 0.0f) ? 1.0f : -1.0f;
+        for (float t = COLLISION_STEP; t <= std::abs(delta.x); t += COLLISION_STEP) {
+            newFeetPos.x = oldFeetPos.x + direction * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.x -= step;
+                newFeetPos.x -= direction * COLLISION_STEP;
                 break;
             }
         }
@@ -156,11 +157,11 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     newFeetPos.z += delta.z;
     if (checkPlayerCollision(newFeetPos)) {
         newFeetPos.z = oldFeetPos.z;
-        float step = (delta.z > 0.0f) ? 0.01f : -0.01f;
-        for (float t = 0.01f; t <= std::abs(delta.z); t += 0.01f) {
-            newFeetPos.z = oldFeetPos.z + step * t;
+        const float direction = (delta.z > 0.0f) ? 1.0f : -1.0f;
+        for (float t = COLLISION_STEP; t <= std::abs(delta.z); t += COLLISION_STEP) {
+            newFeetPos.z = oldFeetPos.z + direction * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.z -= step;
+                newFeetPos.z -= direction * COLLISION_STEP;
                 break;
             }
         }
@@ -176,11 +177,11 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
             playerVelocity.y = 0.0f; // земля
         }
         newFeetPos.y = oldFeetPos.y;
-        float step = (delta.y > 0.0f) ? 0.01f : -0.01f;
-        for (float t = 0.01f; t <= std::abs(delta.y); t += 0.01f) {
-            newFeetPos.y = oldFeetPos.y + step * t;
+        const float direction = (delta.y > 0.0f) ? 1.0f : -1.0f;
+        for (float t = COLLISION_STEP; t <= std::abs(delta.y); t += COLLISION_STEP) {
+            newFeetPos.y = oldFeetPos.y + direction * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.y -= step;
+                newFeetPos.y -= direction * COLLISION_STEP;
                 break;
             }
         }
