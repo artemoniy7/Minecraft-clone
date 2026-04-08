@@ -101,12 +101,15 @@ bool checkPlayerCollision(const glm::vec3& feetPos) {
     glm::vec3 minCorner = feetPos + glm::vec3(-halfWidth, 0.0f, -halfWidth);
     glm::vec3 maxCorner = feetPos + glm::vec3( halfWidth, PLAYER_HEIGHT,  halfWidth);
     
-    int minX = static_cast<int>(std::floor(minCorner.x));
-    int maxX = static_cast<int>(std::floor(maxCorner.x));
-    int minY = static_cast<int>(std::floor(minCorner.y));
-    int maxY = static_cast<int>(std::floor(maxCorner.y));
-    int minZ = static_cast<int>(std::floor(minCorner.z));
-    int maxZ = static_cast<int>(std::floor(maxCorner.z));
+    // Блоки центрированы в целых координатах и занимают [c-0.5, c+0.5].
+    // Поэтому диапазон индексов должен учитывать сдвиг 0.5, иначе теряются
+    // "положительные" грани при касании (например maxCorner == 1.5 не включает блок 2).
+    int minX = static_cast<int>(std::ceil (minCorner.x - 0.5f));
+    int maxX = static_cast<int>(std::floor(maxCorner.x + 0.5f));
+    int minY = static_cast<int>(std::ceil (minCorner.y - 0.5f));
+    int maxY = static_cast<int>(std::floor(maxCorner.y + 0.5f));
+    int minZ = static_cast<int>(std::ceil (minCorner.z - 0.5f));
+    int maxZ = static_cast<int>(std::floor(maxCorner.z + 0.5f));
     
     for (int x = minX; x <= maxX; ++x) {
         for (int y = minY; y <= maxY; ++y) {
@@ -136,16 +139,17 @@ bool isOnGroundCheck(const glm::vec3& feetPos) {
 glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     glm::vec3 newFeetPos = oldFeetPos;
     glm::vec3 actualDelta(0.0f);
+    constexpr float COLLISION_STEP = 0.01f;
     
     // Ось X
     newFeetPos.x += delta.x;
     if (checkPlayerCollision(newFeetPos)) {
         newFeetPos.x = oldFeetPos.x;
-        float step = (delta.x > 0.0f) ? 0.01f : -0.01f;
-        for (float t = 0.01f; t <= std::abs(delta.x); t += 0.01f) {
-            newFeetPos.x = oldFeetPos.x + step * t;
+        const float direction = (delta.x > 0.0f) ? 1.0f : -1.0f;
+        for (float t = COLLISION_STEP; t <= std::abs(delta.x); t += COLLISION_STEP) {
+            newFeetPos.x = oldFeetPos.x + direction * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.x -= step;
+                newFeetPos.x -= direction * COLLISION_STEP;
                 break;
             }
         }
@@ -156,11 +160,11 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     newFeetPos.z += delta.z;
     if (checkPlayerCollision(newFeetPos)) {
         newFeetPos.z = oldFeetPos.z;
-        float step = (delta.z > 0.0f) ? 0.01f : -0.01f;
-        for (float t = 0.01f; t <= std::abs(delta.z); t += 0.01f) {
-            newFeetPos.z = oldFeetPos.z + step * t;
+        const float direction = (delta.z > 0.0f) ? 1.0f : -1.0f;
+        for (float t = COLLISION_STEP; t <= std::abs(delta.z); t += COLLISION_STEP) {
+            newFeetPos.z = oldFeetPos.z + direction * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.z -= step;
+                newFeetPos.z -= direction * COLLISION_STEP;
                 break;
             }
         }
@@ -176,11 +180,11 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
             playerVelocity.y = 0.0f; // земля
         }
         newFeetPos.y = oldFeetPos.y;
-        float step = (delta.y > 0.0f) ? 0.01f : -0.01f;
-        for (float t = 0.01f; t <= std::abs(delta.y); t += 0.01f) {
-            newFeetPos.y = oldFeetPos.y + step * t;
+        const float direction = (delta.y > 0.0f) ? 1.0f : -1.0f;
+        for (float t = COLLISION_STEP; t <= std::abs(delta.y); t += COLLISION_STEP) {
+            newFeetPos.y = oldFeetPos.y + direction * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.y -= step;
+                newFeetPos.y -= direction * COLLISION_STEP;
                 break;
             }
         }
