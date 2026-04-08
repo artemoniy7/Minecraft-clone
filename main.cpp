@@ -101,12 +101,15 @@ bool checkPlayerCollision(const glm::vec3& feetPos) {
     glm::vec3 minCorner = feetPos + glm::vec3(-halfWidth, 0.0f, -halfWidth);
     glm::vec3 maxCorner = feetPos + glm::vec3( halfWidth, PLAYER_HEIGHT,  halfWidth);
     
-    int minX = static_cast<int>(std::floor(minCorner.x));
-    int maxX = static_cast<int>(std::floor(maxCorner.x));
-    int minY = static_cast<int>(std::floor(minCorner.y));
-    int maxY = static_cast<int>(std::floor(maxCorner.y));
-    int minZ = static_cast<int>(std::floor(minCorner.z));
-    int maxZ = static_cast<int>(std::floor(maxCorner.z));
+    // Блоки центрированы в целых координатах и занимают [c-0.5, c+0.5].
+    // Поэтому диапазон индексов должен учитывать сдвиг 0.5, иначе теряются
+    // "положительные" грани при касании (например maxCorner == 1.5 не включает блок 2).
+    int minX = static_cast<int>(std::ceil (minCorner.x - 0.5f));
+    int maxX = static_cast<int>(std::floor(maxCorner.x + 0.5f));
+    int minY = static_cast<int>(std::ceil (minCorner.y - 0.5f));
+    int maxY = static_cast<int>(std::floor(maxCorner.y + 0.5f));
+    int minZ = static_cast<int>(std::ceil (minCorner.z - 0.5f));
+    int maxZ = static_cast<int>(std::floor(maxCorner.z + 0.5f));
     
     for (int x = minX; x <= maxX; ++x) {
         for (int y = minY; y <= maxY; ++y) {
