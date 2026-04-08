@@ -33,7 +33,9 @@
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
+// ----------------------------------------------------------------------
 // Глобальные объекты шума
+// ----------------------------------------------------------------------
 FastNoiseLite continentNoise;
 FastNoiseLite erosionNoise;
 FastNoiseLite mountainNoise;
@@ -45,43 +47,183 @@ FastNoiseLite detailNoise;
 FastNoiseLite seaLevelNoise;
 FastNoiseLite transitionNoise;
 
+// ----------------------------------------------------------------------
 // Окно и камера
+// ----------------------------------------------------------------------
 const unsigned int SCR_WIDTH = 1280;
 const unsigned int SCR_HEIGHT = 720;
 const int BLOCK_UNKNOWN = -1;
 
-// Параметры игрока (физика) - исправлено: камера по центру хитбокса
-glm::vec3 playerPos;           // позиция ног (центр по X/Z)
-glm::vec3 cameraPos;           // позиция камеры (глаза)
+glm::vec3 cameraPos   = glm::vec3(0.0f, 50.0f,  0.0f);
 glm::vec3 cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
-glm::vec3 cameraUp    = glm::vec3(0.0f, 1.0f, 0.0f);
+glm::vec3 cameraUp    = glm::vec3(0.0f, 1.0f,  0.0f);
 
 float yaw   = -90.0f;
 float pitch =  0.0f;
 float lastX = SCR_WIDTH / 2.0f;
 float lastY = SCR_HEIGHT / 2.0f;
 bool firstMouse = true;
-bool ignoreMouseEvent = false;
 float deltaTime = 0.0f;
 float lastFrame = 0.0f;
 
-// Физика игрока:
-// - ширина коллизии: 0.3 блока (по 0.35 блока отступа с каждой стороны при стоянии по центру блока)
-// - высота коллизии: 1.9 блока
-// - камера всегда по центру тела по X/Z
-float playerWidth  = 0.3f;
-float playerHeight = 1.9f;
-float eyeHeight    = 1.62f;
-float velocityY    = 0.0f;
-bool onGround      = true;
-float gravity      = 20.0f;
-float jumpSpeed    = 7.0f;
-float walkSpeed    = 4.5f;
-float sprintSpeed  = 7.0f;
-float currentSpeed = walkSpeed;
-bool jumpRequested = false;
+// ----------------------------------------------------------------------
+// Параметры чанков (вынесены наверх, чтобы были доступны везде)
+// ----------------------------------------------------------------------
+const int CHUNK_SIZE_X = 17;
+const int CHUNK_SIZE_Z = 17;
+const int CHUNK_SIZE_Y = 128;
 
+// ----------------------------------------------------------------------
+// Физика и коллизии
+// ----------------------------------------------------------------------
+glm::vec3 playerVelocity = glm::vec3(0.0f);
+bool isOnGround = false;
+const float GRAVITY = -25.0f;
+const float JUMP_POWER = 8.0f;
+const float PLAYER_HEIGHT = 1.8f;
+const float PLAYER_WIDTH = 0.6f;
+const float EYE_HEIGHT = 1.62f;
+
+// Прототипы функций (чтобы коллизии могли их вызывать)
+int getBlockAt(int wx, int wy, int wz);
+void setBlockAt(int wx, int wy, int wz, int type);
+int getBlockAtForMesh(int wx, int wy, int wz);
+
+// ----------------------------------------------------------------------
+// Физика и коллизии (исправленная версия)
+// ----------------------------------------------------------------------
+
+bool isSolidBlock(int blockId) {
+    // Вода (5) проходима, все остальные блоки считаются твёрдыми
+    return blockId != 0 && blockId != 5;
+}
+
+// Проверяет, пересекается ли AABB игрока с каким-либо твёрдым блоком
+bool checkPlayerCollision(const glm::vec3& feetPos) {
+    float halfWidth = PLAYER_WIDTH * 0.5f;
+    glm::vec3 minCorner = feetPos + glm::vec3(-halfWidth, 0.0f, -halfWidth);
+    glm::vec3 maxCorner = feetPos + glm::vec3( halfWidth, PLAYER_HEIGHT,  halfWidth);
+    
+    int minX = static_cast<int>(std::floor(minCorner.x));
+    int maxX = static_cast<int>(std::floor(maxCorner.x));
+    int minY = static_cast<int>(std::floor(minCorner.y));
+    int maxY = static_cast<int>(std::floor(maxCorner.y));
+    int minZ = static_cast<int>(std::floor(minCorner.z));
+    int maxZ = static_cast<int>(std::floor(maxCorner.z));
+    
+    for (int x = minX; x <= maxX; ++x) {
+        for (int y = minY; y <= maxY; ++y) {
+            for (int z = minZ; z <= maxZ; ++z) {
+                int blockId = getBlockAt(x, y, z);
+                if (isSolidBlock(blockId)) {
+                    // AABB блока: центр в целых координатах, половинный размер 0.5
+                    glm::vec3 blockMin(x - 0.5f, y - 0.5f, z - 0.5f);
+                    glm::vec3 blockMax(x + 0.5f, y + 0.5f, z + 0.5f);
+                    if (minCorner.x <= blockMax.x && maxCorner.x >= blockMin.x &&
+                        minCorner.y <= blockMax.y && maxCorner.y >= blockMin.y &&
+                        minCorner.z <= blockMax.z && maxCorner.z >= blockMin.z) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Проверяет, есть ли твёрдый блок непосредственно под ногами игрока (с допуском epsilon)
+bool isOnGroundCheck(const glm::vec3& feetPos) {
+    glm::vec3 feetBelow = feetPos;
+    feetBelow.y -= 0.05f;
+    return checkPlayerCollision(feetBelow);
+}
+
+// Применяет коллизию к движению, возвращает реальное смещение ног
+glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
+    glm::vec3 newFeetPos = oldFeetPos;
+    glm::vec3 actualDelta = glm::vec3(0.0f);
+    
+    // ----- Обработка оси X -----
+    newFeetPos.x += delta.x;
+    if (checkPlayerCollision(newFeetPos)) {
+        // Откатываем и пытаемся придвинуться вплотную к стене
+        newFeetPos.x = oldFeetPos.x;
+        float step = (delta.x > 0.0f) ? 0.01f : -0.01f;
+        for (float t = 0.01f; t <= std::abs(delta.x); t += 0.01f) {
+            newFeetPos.x = oldFeetPos.x + step * t;
+            if (checkPlayerCollision(newFeetPos)) {
+                newFeetPos.x -= step;
+                break;
+            }
+        }
+    }
+    actualDelta.x = newFeetPos.x - oldFeetPos.x;
+    
+    // ----- Обработка оси Z -----
+    newFeetPos.z += delta.z;
+    if (checkPlayerCollision(newFeetPos)) {
+        newFeetPos.z = oldFeetPos.z;
+        float step = (delta.z > 0.0f) ? 0.01f : -0.01f;
+        for (float t = 0.01f; t <= std::abs(delta.z); t += 0.01f) {
+            newFeetPos.z = oldFeetPos.z + step * t;
+            if (checkPlayerCollision(newFeetPos)) {
+                newFeetPos.z -= step;
+                break;
+            }
+        }
+    }
+    actualDelta.z = newFeetPos.z - oldFeetPos.z;
+    
+    // ----- Обработка оси Y -----
+    newFeetPos.y += delta.y;
+    if (checkPlayerCollision(newFeetPos)) {
+        // Если столкнулись при движении вверх (потолок)
+        if (delta.y > 0.0f) {
+            playerVelocity.y = 0.0f;
+        }
+        // Если столкнулись при движении вниз (земля)
+        else if (delta.y < 0.0f) {
+            playerVelocity.y = 0.0f;
+        }
+        // Откатываем и придвигаемся к поверхности
+        newFeetPos.y = oldFeetPos.y;
+        float step = (delta.y > 0.0f) ? 0.01f : -0.01f;
+        for (float t = 0.01f; t <= std::abs(delta.y); t += 0.01f) {
+            newFeetPos.y = oldFeetPos.y + step * t;
+            if (checkPlayerCollision(newFeetPos)) {
+                newFeetPos.y -= step;
+                break;
+            }
+        }
+    }
+    actualDelta.y = newFeetPos.y - oldFeetPos.y;
+    
+    // Обновляем состояние "на земле"
+    isOnGround = isOnGroundCheck(newFeetPos);
+    
+    return actualDelta;
+}
+
+// Устанавливает игрока на поверхность ближайшего твёрдого блока
+void placePlayerOnGround() {
+    glm::vec3 feetPos = cameraPos - glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
+    // Опускаем, пока не коснёмся земли
+    while (feetPos.y > -10.0f && !checkPlayerCollision(feetPos)) {
+        feetPos.y -= 0.1f;
+    }
+    // Поднимаем, если внутри блока
+    while (feetPos.y < static_cast<float>(CHUNK_SIZE_Y) && checkPlayerCollision(feetPos)) {
+        feetPos.y += 0.05f;
+    }
+    // Фиксируем позицию на поверхности
+    feetPos.y -= 0.05f;
+    cameraPos = feetPos + glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
+    playerVelocity = glm::vec3(0.0f);
+    isOnGround = true;
+}
+// ----------------------------------------------------------------------
 // Типы блоков
+// ----------------------------------------------------------------------
 struct BlockType {
     int id;
     std::string name;
@@ -90,11 +232,9 @@ struct BlockType {
 std::unordered_map<int, BlockType> blockTypes;
 int currentBlockType = 1;
 
-// Параметры чанков
-const int CHUNK_SIZE_X = 17;
-const int CHUNK_SIZE_Z = 17;
-const int CHUNK_SIZE_Y = 128;
-
+// ----------------------------------------------------------------------
+// Сохранение/загрузка чанков
+// ----------------------------------------------------------------------
 const std::string SAVE_DIR = "saves/world";
 const std::string CHUNKS_DIR = SAVE_DIR + "/chunks";
 
@@ -159,7 +299,9 @@ std::shared_ptr<ChunkData> loadChunkFromFile(int cx, int cz) {
     return data;
 }
 
+// ----------------------------------------------------------------------
 // Инициализация шумов
+// ----------------------------------------------------------------------
 void initWorldNoise() {
     continentNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
     continentNoise.SetFrequency(0.0008f);
@@ -210,6 +352,9 @@ void initWorldNoise() {
     transitionNoise.SetFractalOctaves(2);
 }
 
+// ----------------------------------------------------------------------
+// Высота и биомы
+// ----------------------------------------------------------------------
 float getHeightAt(int wx, int wz, float& outBiomeTemp, float& outBiomeHumid, float& outWaterLevel) {
     float seaNoise = seaLevelNoise.GetNoise((float)wx, (float)wz);
     outWaterLevel = 35.0f + seaNoise * 20.0f;
@@ -232,9 +377,14 @@ float getHeightAt(int wx, int wz, float& outBiomeTemp, float& outBiomeHumid, flo
     
     float erosion = erosionNoise.GetNoise((float)wx, (float)wz) * 6.0f;
     float mountain = 0.0f;
-    if (cont > 0.25f) mountain = mountainNoise.GetNoise((float)wx, (float)wz) * 12.0f;
+    if (cont > 0.25f) {
+        mountain = mountainNoise.GetNoise((float)wx, (float)wz) * 12.0f;
+    }
     float river = riverNoise.GetNoise((float)wx, (float)wz);
-    float riverFactor = (std::abs(river) < 0.1f) ? -5.0f * (1.0f - std::abs(river) / 0.1f) : 0.0f;
+    float riverFactor = 0.0f;
+    if (std::abs(river) < 0.1f) {
+        riverFactor = -5.0f * (1.0f - std::abs(river) / 0.1f);
+    }
     float detail = detailNoise.GetNoise((float)wx, (float)wz) * 2.0f;
     
     float height = baseHeight + erosion + mountain + riverFactor + detail;
@@ -253,8 +403,7 @@ int getBiome(float temp, float humid, float height, float waterLevel) {
         if (depth < 10.0f) return 4;
         return 5;
     }
-    float beachZone = height - waterLevel;
-    if (beachZone < 3.0f) return 6;
+    if (height - waterLevel < 3.0f) return 6;
     float t = (temp + 1.0f) / 2.0f;
     float h = (humid + 1.0f) / 2.0f;
     if (height > waterLevel + 25.0f) return 2;
@@ -264,7 +413,9 @@ int getBiome(float temp, float humid, float height, float waterLevel) {
     return 0;
 }
 
+// ----------------------------------------------------------------------
 // Деревья
+// ----------------------------------------------------------------------
 bool isTreeNearby(int lx, int lz, int surfaceY, const std::vector<int>& blocks) {
     for (int dx = -3; dx <= 3; ++dx) {
         for (int dz = -3; dz <= 3; ++dz) {
@@ -331,7 +482,9 @@ void addTree(int cx, int cz, int lx, int lz, int surfaceY, std::vector<int>& blo
     }
 }
 
+// ----------------------------------------------------------------------
 // Генерация чанка
+// ----------------------------------------------------------------------
 std::shared_ptr<ChunkData> generateChunk(int cx, int cz) {
     auto data = std::make_shared<ChunkData>(cx, cz);
     
@@ -352,18 +505,37 @@ std::shared_ptr<ChunkData> generateChunk(int cx, int cz) {
             
             for (int y = 0; y < CHUNK_SIZE_Y; ++y) {
                 int blockId = 0;
+                
                 if (biome == 3 || biome == 4 || biome == 5) {
-                    if (y == surfaceY) blockId = (biome == 5) ? 3 : 4;
-                    else if (y > surfaceY && y <= waterSurfaceY) blockId = 5;
-                    else if (y < surfaceY) blockId = (y > surfaceY - 4) ? 4 : 3;
+                    if (y == surfaceY) {
+                        blockId = (biome == 5) ? 3 : 4;
+                    } else if (y > surfaceY && y <= waterSurfaceY) {
+                        blockId = 5;
+                    } else if (y < surfaceY) {
+                        if (y > surfaceY - 4) blockId = 4;
+                        else blockId = 3;
+                    }
                 } else if (biome == 6) {
-                    if (y == surfaceY) blockId = 4;
-                    else if (y < surfaceY) blockId = (y > surfaceY - 3) ? 4 : 3;
+                    if (y == surfaceY) {
+                        blockId = 4;
+                    } else if (y < surfaceY) {
+                        if (y > surfaceY - 3) blockId = 4;
+                        else blockId = 3;
+                    }
                 } else {
-                    if (y == surfaceY) blockId = (biome == 2 || biome == 7) ? 3 : ((biome == 8) ? 4 : 1);
-                    else if (y > surfaceY - 4 && y < surfaceY) blockId = (biome == 2 || biome == 7) ? 3 : ((biome == 8) ? 4 : 2);
-                    else if (y < surfaceY - 4) blockId = 3;
+                    if (y == surfaceY) {
+                        if (biome == 2 || biome == 7) blockId = 3;
+                        else if (biome == 8) blockId = 4;
+                        else blockId = 1;
+                    } else if (y > surfaceY - 4 && y < surfaceY) {
+                        if (biome == 2 || biome == 7) blockId = 3;
+                        else if (biome == 8) blockId = 4;
+                        else blockId = 2;
+                    } else if (y < surfaceY - 4) {
+                        blockId = 3;
+                    }
                 }
+                
                 data->blocks[(x * CHUNK_SIZE_Y + y) * CHUNK_SIZE_Z + z] = blockId;
             }
             
@@ -373,7 +545,6 @@ std::shared_ptr<ChunkData> generateChunk(int cx, int cz) {
         }
     }
     
-    // сглаживание берегов
     for (int x = 0; x < CHUNK_SIZE_X; ++x) {
         for (int z = 0; z < CHUNK_SIZE_Z; ++z) {
             int worldX = cx * CHUNK_SIZE_X + x;
@@ -381,24 +552,32 @@ std::shared_ptr<ChunkData> generateChunk(int cx, int cz) {
             float biomeTemp, biomeHumid, waterLevel;
             float landHeight = getHeightAt(worldX, worldZ, biomeTemp, biomeHumid, waterLevel);
             int surfaceY = (int)landHeight;
+            
             bool hasWaterNeighbor = false;
-            for (int dx = -1; dx <= 1 && !hasWaterNeighbor; ++dx) {
+            for (int dx = -1; dx <= 1; ++dx) {
                 for (int dz = -1; dz <= 1; ++dz) {
                     if (dx == 0 && dz == 0) continue;
-                    int nx = x + dx, nz = z + dz;
+                    int nx = x + dx;
+                    int nz = z + dz;
                     if (nx >= 0 && nx < CHUNK_SIZE_X && nz >= 0 && nz < CHUNK_SIZE_Z) {
                         int nWorldX = cx * CHUNK_SIZE_X + nx;
                         int nWorldZ = cz * CHUNK_SIZE_Z + nz;
                         float nTemp, nHumid, nWaterLevel;
                         float nHeight = getHeightAt(nWorldX, nWorldZ, nTemp, nHumid, nWaterLevel);
-                        if (nHeight <= nWaterLevel) { hasWaterNeighbor = true; break; }
+                        if (nHeight <= nWaterLevel) {
+                            hasWaterNeighbor = true;
+                            break;
+                        }
                     }
                 }
+                if (hasWaterNeighbor) break;
             }
+            
             if (hasWaterNeighbor && landHeight > waterLevel && landHeight - waterLevel < 4.0f) {
                 int idx = (x * CHUNK_SIZE_Y + surfaceY) * CHUNK_SIZE_Z + z;
-                int currentBlock = data->blocks[idx];
-                if (currentBlock == 1 || currentBlock == 2) data->blocks[idx] = 4;
+                if (data->blocks[idx] == 1 || data->blocks[idx] == 2) {
+                    data->blocks[idx] = 4;
+                }
             }
         }
     }
@@ -407,7 +586,9 @@ std::shared_ptr<ChunkData> generateChunk(int cx, int cz) {
     return data;
 }
 
-// Очереди для фоновых потоков
+// ----------------------------------------------------------------------
+// Фоновые задачи
+// ----------------------------------------------------------------------
 std::mutex chunkMutex;
 std::unordered_map<glm::ivec2, std::shared_ptr<ChunkData>, hash_ivec2> pendingData;
 std::unordered_set<glm::ivec2, hash_ivec2> pendingSave;
@@ -444,44 +625,14 @@ void workerFunction() {
                 processed++;
             }
         }
-        if (processed == 0) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (processed == 0) std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
 }
 
-// Прототипы
-int getBlockAt(int wx, int wy, int wz);
-int getBlockAtForCollision(int wx, int wy, int wz);
-int getBlockAtCollision(int wx, int wy, int wz); // alias для совместимости
-void setBlockAt(int wx, int wy, int wz, int type);
-int getBlockAtForMesh(int wx, int wy, int wz);
-
-// === НОВАЯ ФУНКЦИЯ КОЛЛИЗИИ ===
-bool isColliding(glm::vec3 pos) {
-    constexpr float EPS = 0.001f;
-    float halfW = playerWidth / 2.0f;
-    int minX = (int)std::floor(pos.x - halfW + EPS);
-    int maxX = (int)std::floor(pos.x + halfW - EPS);
-    int minY = (int)std::floor(pos.y + EPS);
-    int maxY = (int)std::floor(pos.y + playerHeight - EPS);
-    int minZ = (int)std::floor(pos.z - halfW + EPS);
-    int maxZ = (int)std::floor(pos.z + halfW - EPS);
-
-    for (int x = minX; x <= maxX; ++x) {
-        for (int y = minY; y <= maxY; ++y) {
-            for (int z = minZ; z <= maxZ; ++z) {
-                int block = getBlockAtForCollision(x, y, z);
-                if (block == BLOCK_UNKNOWN || (block != 0 && block != 5))
-                    return true;
-            }
-        }
-    }
-    return false;
-}
-
+// ----------------------------------------------------------------------
 // Шейдерные переменные
+// ----------------------------------------------------------------------
 unsigned int shaderProgram, reticleProgram, reticleVAO;
-unsigned int prismVAO = 0, prismVBO = 0;
-glm::vec3 prismPos(4.0f, 0.0f, 4.0f); // позиция ног центра (как у игрока)
 int u_time_location;
 int u_isWater_location;
 
@@ -499,59 +650,14 @@ static GLint u_modelLoc = -1;
 static GLint u_viewLoc = -1;
 static GLint u_projLoc = -1;
 
-static void initPrismMesh() {
-    const float v[] = {
-        // back
-        0,0,0, 0,0,  1,1,0, 1,1,  1,0,0, 1,0,
-        0,0,0, 0,0,  0,1,0, 0,1,  1,1,0, 1,1,
-        // front
-        0,0,1, 0,0,  1,0,1, 1,0,  1,1,1, 1,1,
-        0,0,1, 0,0,  1,1,1, 1,1,  0,1,1, 0,1,
-        // left
-        0,0,0, 0,0,  0,0,1, 1,0,  0,1,1, 1,1,
-        0,0,0, 0,0,  0,1,1, 1,1,  0,1,0, 0,1,
-        // right
-        1,0,0, 0,0,  1,1,1, 1,1,  1,0,1, 1,0,
-        1,0,0, 0,0,  1,1,0, 0,1,  1,1,1, 1,1,
-        // bottom
-        0,0,0, 0,0,  1,0,1, 1,1,  1,0,0, 1,0,
-        0,0,0, 0,0,  0,0,1, 0,1,  1,0,1, 1,1,
-        // top
-        0,1,0, 0,0,  1,1,0, 1,0,  1,1,1, 1,1,
-        0,1,0, 0,0,  1,1,1, 1,1,  0,1,1, 0,1
-    };
-    glGenVertexArrays(1, &prismVAO);
-    glGenBuffers(1, &prismVBO);
-    glBindVertexArray(prismVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, prismVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
-}
-
-static void renderPlayerSizedPrism() {
-    if (!prismVAO) return;
-    glm::mat4 prismModel = glm::mat4(1.0f);
-    prismModel = glm::translate(prismModel, glm::vec3(prismPos.x - 0.3f, prismPos.y, prismPos.z - 0.3f));
-    prismModel = glm::scale(prismModel, glm::vec3(0.6f, 1.8f, 0.6f));
-    glUniformMatrix4fv(u_modelLoc, 1, GL_FALSE, glm::value_ptr(prismModel));
-    glUniform1i(u_isWater_location, 0);
-    glActiveTexture(GL_TEXTURE0);
-    unsigned int tex = blockTypes.count(1) ? blockTypes[1].textureID : 0;
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glBindVertexArray(prismVAO);
-    glDrawArrays(GL_TRIANGLES, 0, 36);
-    glBindVertexArray(0);
-}
-
+// ----------------------------------------------------------------------
 // UI (меню)
+// ----------------------------------------------------------------------
 unsigned int uiShaderProgram;
 unsigned int uiVAO, uiVBO, uiEBO;
 unsigned int menuBackgroundTexture = 0;
 unsigned int menuButtonTexture = 0;
+unsigned int menuPhotoTexture = 0;
 
 struct Button {
     float relX, relY;
@@ -566,6 +672,10 @@ Button buttons[3] = {
     {0.5f, 0.6f, 0.25f, 0.09f, 0,0,0,0, false, "Load World"},
     {0.5f, 0.7f, 0.25f, 0.09f, 0,0,0,0, false, "Exit"}
 };
+
+float photoRelX = 0.5f, photoRelY = 0.25f;
+float photoRelW = 0.5f, photoRelH = 0.2f;
+float photoAbsX = 0, photoAbsY = 0, photoAbsW = 0, photoAbsH = 0;
 
 const char* uiVertexShaderSrc = R"(
 #version 330 core
@@ -640,6 +750,18 @@ void loadMenuTextures() {
         glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,w,h,0,GL_RGBA,GL_UNSIGNED_BYTE,data);
         stbi_image_free(data);
     }
+    data = stbi_load("textures/menu_photo.png", &w, &h, &ch, 4);
+    if(data) {
+        glGenTextures(1, &menuPhotoTexture);
+        glBindTexture(GL_TEXTURE_2D, menuPhotoTexture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        stbi_image_free(data);
+        std::cout << "Loaded menu photo: textures/menu_photo.png" << std::endl;
+    } else {
+        std::cerr << "Failed to load menu photo: textures/menu_photo.png" << std::endl;
+    }
 }
 
 void updateButtonPositions(int screenW, int screenH) {
@@ -649,6 +771,13 @@ void updateButtonPositions(int screenW, int screenH) {
         buttons[i].absX = buttons[i].relX * screenW - buttons[i].absW/2;
         buttons[i].absY = buttons[i].relY * screenH - buttons[i].absH/2;
     }
+}
+
+void updatePhotoPosition(int screenW, int screenH) {
+    photoAbsW = photoRelW * screenW;
+    photoAbsH = photoRelH * screenH;
+    photoAbsX = photoRelX * screenW - photoAbsW / 2;
+    photoAbsY = photoRelY * screenH - photoAbsH / 2;
 }
 
 void drawRectangle(float x, float y, float w, float h, unsigned int texture, int screenW, int screenH) {
@@ -665,7 +794,9 @@ void drawRectangle(float x, float y, float w, float h, unsigned int texture, int
     glDrawElements(GL_TRIANGLES,6,GL_UNSIGNED_INT,0);
 }
 
+// ----------------------------------------------------------------------
 // Музыка через SFML
+// ----------------------------------------------------------------------
 std::vector<std::string> musicFiles;
 sf::Music currentMusic;
 int currentTrackIndex = -1;
@@ -676,15 +807,21 @@ float trackStartTime = 0.0f;
 void playRandomMusic() {
     if (musicFiles.empty()) return;
     if (musicTransitioning) return;
+    
     musicTransitioning = true;
+    
     static std::random_device rd;
     static std::mt19937 gen(rd());
     std::uniform_int_distribution<> dis(0, static_cast<int>(musicFiles.size()) - 1);
     int newIndex = dis(gen);
-    if (newIndex == currentTrackIndex && musicFiles.size() > 1) newIndex = (newIndex + 1) % musicFiles.size();
+    if (newIndex == currentTrackIndex && musicFiles.size() > 1) {
+        newIndex = (newIndex + 1) % musicFiles.size();
+    }
     currentTrackIndex = newIndex;
     std::string path = musicFiles[currentTrackIndex];
+    
     currentMusic.stop();
+    
     if (currentMusic.openFromFile(path)) {
         currentMusic.play();
         musicPlaying = true;
@@ -694,6 +831,7 @@ void playRandomMusic() {
         std::cerr << "Failed to load music: " << path << std::endl;
         musicPlaying = false;
     }
+    
     musicTransitioning = false;
 }
 
@@ -711,7 +849,10 @@ void startMusic() {
 
 void scanMusicFolder() {
     std::string musicDir = "music";
-    if (!fs::exists(musicDir)) fs::create_directory(musicDir);
+    if (!fs::exists(musicDir)) {
+        fs::create_directory(musicDir);
+        std::cout << "Created music folder. Please add .wav/.ogg files there." << std::endl;
+    }
     for (const auto& entry : fs::directory_iterator(musicDir)) {
         if (entry.is_regular_file()) {
             std::string ext = entry.path().extension().string();
@@ -722,20 +863,40 @@ void scanMusicFolder() {
             }
         }
     }
-    if (musicFiles.empty()) std::cout << "No music files found in 'music' folder." << std::endl;
-    else std::cout << "Total music files: " << musicFiles.size() << std::endl;
+    if (musicFiles.empty()) {
+        std::cout << "No music files found in 'music' folder." << std::endl;
+    } else {
+        std::cout << "Total music files: " << musicFiles.size() << std::endl;
+    }
 }
 
 void updateMusic() {
-    if (!musicPlaying || musicTransitioning) return;
+    if (!musicPlaying) return;
+    if (musicTransitioning) return;
+    
     sf::SoundSource::Status status = currentMusic.getStatus();
-    if (status == sf::SoundSource::Status::Stopped && (glfwGetTime() - trackStartTime) > 3.0f) {
+    float elapsed = glfwGetTime() - trackStartTime;
+    
+    static float lastLogTime = 0;
+    if (glfwGetTime() - lastLogTime > 10.0f) {
+        lastLogTime = glfwGetTime();
+        const char* statusStr = "Unknown";
+        if (status == sf::SoundSource::Status::Playing) statusStr = "Playing";
+        else if (status == sf::SoundSource::Status::Paused) statusStr = "Paused";
+        else if (status == sf::SoundSource::Status::Stopped) statusStr = "Stopped";
+        std::cout << "Music: " << statusStr << ", elapsed " << elapsed << "s" << std::endl;
+    }
+    
+    if (status == sf::SoundSource::Status::Stopped && elapsed > 3.0f) {
+        std::cout << "Track finished naturally, switching..." << std::endl;
         musicPlaying = false;
         playRandomMusic();
     }
 }
 
+// ----------------------------------------------------------------------
 // Структура чанка (рендер)
+// ----------------------------------------------------------------------
 struct Chunk {
     glm::ivec2 pos;
     std::shared_ptr<ChunkData> data;
@@ -750,8 +911,10 @@ struct Chunk {
     Chunk(int cx, int cz) : pos(cx, cz) {
         std::lock_guard<std::mutex> lock(chunkMutex);
         std::string filename = CHUNKS_DIR + "/chunk_" + std::to_string(cx) + "_" + std::to_string(cz) + ".json";
-        if (fs::exists(filename)) pendingLoad.insert(pos);
-        else pendingGen.insert(pos);
+        if (fs::exists(filename))
+            pendingLoad.insert(pos);
+        else
+            pendingGen.insert(pos);
     }
 
     bool updateData() {
@@ -927,10 +1090,15 @@ struct Chunk {
         dirty = false;
         std::vector<int> blocksCopy = data->blocks;
         glm::ivec2 posCopy = pos;
-        std::thread([posCopy, blocksCopy]() { saveChunkToFile(posCopy, blocksCopy); }).detach();
+        std::thread([posCopy, blocksCopy]() {
+            saveChunkToFile(posCopy, blocksCopy);
+        }).detach();
     }
 };
 
+// ----------------------------------------------------------------------
+// getBlockAtForMesh с кешированием
+// ----------------------------------------------------------------------
 int getBlockAtForMesh(int wx, int wy, int wz) {
     if (wy < 0 || wy >= CHUNK_SIZE_Y) return 0;
     int cx = (wx >= 0) ? wx / CHUNK_SIZE_X : (wx - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
@@ -965,21 +1133,6 @@ int getBlockAt(int wx, int wy, int wz) {
     return it->second.getLocalBlock(lx, wy, lz);
 }
 
-int getBlockAtForCollision(int wx, int wy, int wz) {
-    if (wy < 0 || wy >= CHUNK_SIZE_Y) return BLOCK_UNKNOWN;
-    int cx = (wx >= 0) ? wx / CHUNK_SIZE_X : (wx - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
-    int cz = (wz >= 0) ? wz / CHUNK_SIZE_Z : (wz - CHUNK_SIZE_Z + 1) / CHUNK_SIZE_Z;
-    auto it = loadedChunks.find({cx, cz});
-    if (it == loadedChunks.end()) return BLOCK_UNKNOWN;
-    int lx = wx - cx * CHUNK_SIZE_X;
-    int lz = wz - cz * CHUNK_SIZE_Z;
-    return it->second.getLocalBlock(lx, wy, lz);
-}
-
-int getBlockAtCollision(int wx, int wy, int wz) {
-    return getBlockAtForCollision(wx, wy, wz);
-}
-
 void setBlockAt(int wx, int wy, int wz, int type) {
     if (wy < 0 || wy >= CHUNK_SIZE_Y) return;
     int cx = (wx >= 0) ? wx / CHUNK_SIZE_X : (wx - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
@@ -1008,12 +1161,14 @@ void setBlockAt(int wx, int wy, int wz, int type) {
     waterChunksCacheValid = false;
 }
 
+// ----------------------------------------------------------------------
 // Управление чанками
-void updateChunksAroundCamera(const glm::vec3& camPos) {
-    int centerCX = (int)std::floor(camPos.x / CHUNK_SIZE_X);
-    int centerCZ = (int)std::floor(camPos.z / CHUNK_SIZE_Z);
-    const int RENDER_RADIUS = 20;
-    const int LOAD_RADIUS = 24;
+// ----------------------------------------------------------------------
+void updateChunksAroundCamera(const glm::vec3& cameraPos) {
+    int centerCX = (int)std::floor(cameraPos.x / CHUNK_SIZE_X);
+    int centerCZ = (int)std::floor(cameraPos.z / CHUNK_SIZE_Z);
+    const int RENDER_RADIUS = 12;
+    const int LOAD_RADIUS = RENDER_RADIUS + 1;
 
     std::unordered_set<glm::ivec2, hash_ivec2> neededForLoad;
     for (int dx = -LOAD_RADIUS; dx <= LOAD_RADIUS; ++dx)
@@ -1059,7 +1214,9 @@ void saveAllChunks() {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
+// ----------------------------------------------------------------------
 // Загрузка текстур блоков
+// ----------------------------------------------------------------------
 unsigned int loadTextureStrip(const char* path, bool forceAlpha = false) {
     unsigned int tex;
     glGenTextures(1, &tex);
@@ -1100,7 +1257,9 @@ bool loadBlockConfig(const std::string& path) {
     return !blockTypes.empty();
 }
 
+// ----------------------------------------------------------------------
 // RayCast
+// ----------------------------------------------------------------------
 bool rayCast(glm::vec3 origin, glm::vec3 direction, int& hitX, int& hitY, int& hitZ, int& faceHit, float maxDistance) {
     direction = glm::normalize(direction);
     glm::ivec3 pos((int)std::floor(origin.x+0.5f), (int)std::floor(origin.y+0.5f), (int)std::floor(origin.z+0.5f));
@@ -1148,152 +1307,14 @@ bool rayCast(glm::vec3 origin, glm::vec3 direction, int& hitX, int& hitY, int& h
     return false;
 }
 
-// ФИЗИКА И КОЛЛИЗИИ (исправлено: камера по центру, точная коллизия)
-inline bool isSolidBlock(int id) {
-    return id != 0 && id != 5;
-}
-
-void getPlayerAABB(const glm::vec3& pos, glm::vec3& outMin, glm::vec3& outMax) {
-    outMin = glm::vec3(pos.x - playerWidth/2.0f, pos.y, pos.z - playerWidth/2.0f);
-    outMax = glm::vec3(pos.x + playerWidth/2.0f, pos.y + playerHeight, pos.z + playerWidth/2.0f);
-}
-
-// Проверка коллизий с точной границей
-bool checkCollision(const glm::vec3& aabbMin, const glm::vec3& aabbMax) {
-    int minX = (int)std::floor(aabbMin.x);
-    int maxX = (int)std::floor(aabbMax.x - 1e-6f);
-    int minY = (int)std::floor(aabbMin.y);
-    int maxY = (int)std::floor(aabbMax.y - 1e-6f);
-    int minZ = (int)std::floor(aabbMin.z);
-    int maxZ = (int)std::floor(aabbMax.z - 1e-6f);
-    for (int x = minX; x <= maxX; ++x) {
-        for (int y = minY; y <= maxY; ++y) {
-            for (int z = minZ; z <= maxZ; ++z) {
-                int block = getBlockAtCollision(x, y, z);
-                if (isSolidBlock(block)) return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool intersectsSolidBlockAABB(const glm::vec3& playerMin, const glm::vec3& playerMax, int bx, int by, int bz) {
-    const glm::vec3 blockMin((float)bx - 0.5f, (float)by - 0.5f, (float)bz - 0.5f);
-    const glm::vec3 blockMax((float)bx + 0.5f, (float)by + 0.5f, (float)bz + 0.5f);
-    const bool overlapX = (playerMin.x < blockMax.x) && (playerMax.x > blockMin.x);
-    const bool overlapY = (playerMin.y < blockMax.y) && (playerMax.y > blockMin.y);
-    const bool overlapZ = (playerMin.z < blockMax.z) && (playerMax.z > blockMin.z);
-    return overlapX && overlapY && overlapZ;
-}
-
-// Корректировка позиции по одной оси (исправлено)
-bool adjustAxis(glm::vec3& pos, float delta, int axis, const glm::vec3& aabbMin, const glm::vec3& aabbMax) {
-    if (delta == 0.0f) return false;
-    glm::vec3 newMin = aabbMin;
-    glm::vec3 newMax = aabbMax;
-    const float epsilon = 1e-5f;
-    if (axis == 0) { // X
-        newMin.x += delta;
-        newMax.x += delta;
-        if (!checkCollision(newMin, newMax)) {
-            pos.x += delta;
-            return false;
-        } else {
-            if (delta > 0) {
-                pos.x = std::floor(aabbMax.x + delta - epsilon) - playerWidth/2.0f;
-            } else {
-                pos.x = std::ceil(aabbMin.x + delta + epsilon) + playerWidth/2.0f;
-            }
-            return true;
-        }
-    } else if (axis == 1) { // Y
-        newMin.y += delta;
-        newMax.y += delta;
-        if (!checkCollision(newMin, newMax)) {
-            pos.y += delta;
-            return false;
-        } else {
-            if (delta > 0) {
-                pos.y = std::floor(aabbMax.y + delta - epsilon) - playerHeight;
-            } else {
-                pos.y = std::ceil(aabbMin.y + delta + epsilon);
-            }
-            return true;
-        }
-    } else if (axis == 2) { // Z
-        newMin.z += delta;
-        newMax.z += delta;
-        if (!checkCollision(newMin, newMax)) {
-            pos.z += delta;
-            return false;
-        } else {
-            if (delta > 0) {
-                pos.z = std::floor(aabbMax.z + delta - epsilon) - playerWidth/2.0f;
-            } else {
-                pos.z = std::ceil(aabbMin.z + delta + epsilon) + playerWidth/2.0f;
-            }
-            return true;
-        }
-    }
-    return false;
-}
-
-void updatePlayer(float dt) {
-    if (dt > 0.05f) dt = 0.05f;
-
-    float speed = walkSpeed;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) speed = sprintSpeed;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) speed *= 0.45f;
-
-    glm::vec3 forward = glm::normalize(cameraFront);
-    glm::vec3 right = glm::normalize(glm::cross(cameraFront, cameraUp));
-    glm::vec3 up = glm::normalize(cameraUp);
-
-    glm::vec3 moveDir(0.0f);
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_W) == GLFW_PRESS) moveDir += forward;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_S) == GLFW_PRESS) moveDir -= forward;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_A) == GLFW_PRESS) moveDir -= right;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_D) == GLFW_PRESS) moveDir += right;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_SPACE) == GLFW_PRESS) moveDir += up;
-    if (glfwGetKey(glfwGetCurrentContext(), GLFW_KEY_C) == GLFW_PRESS) moveDir -= up;
-
-    if (glm::length(moveDir) > 0.001f) {
-        cameraPos += glm::normalize(moveDir) * speed * dt;
-    }
-
-    // Поддерживаем playerPos только для UI/логики чанков.
-    playerPos = cameraPos - glm::vec3(0.0f, eyeHeight, 0.0f);
-    velocityY = 0.0f;
-    onGround = false;
-}
-
-// Сброс игрока в начальную точку
-void resetPlayer() {
-    float temp, humid, waterLevel;
-    float groundY = getHeightAt(0, 0, temp, humid, waterLevel);
-    if (groundY < waterLevel + 1.0f) groundY = waterLevel + 1.0f;
-    playerPos = glm::vec3(0.0f, groundY + 1.0f, 0.0f);
-    float prismTemp, prismHumid, prismWater;
-    float prismGround = getHeightAt(4, 4, prismTemp, prismHumid, prismWater);
-    if (prismGround < prismWater + 1.0f) prismGround = prismWater + 1.0f;
-    prismPos = glm::vec3(4.0f, prismGround + 1.0f, 4.0f);
-    velocityY = 0.0f;
-    onGround = true;
-    cameraPos = playerPos + glm::vec3(0.0f, eyeHeight, 0.0f);
-    yaw = -90.0f;
-    pitch = 0.0f;
-    cameraFront = glm::vec3(0.0f, 0.0f, -1.0f);
-    firstMouse = true;
-    ignoreMouseEvent = false;
-}
-
+// ----------------------------------------------------------------------
 // Обработка мыши и клавиатуры
+// ----------------------------------------------------------------------
 bool gameStarted = false;
-bool loadingInProgress = false;
 double mouseX = 0, mouseY = 0;
 
 void mouse_button_callback(GLFWwindow* window, int button, int action, int mods) {
-    if ((!gameStarted && !loadingInProgress) && button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+    if (!gameStarted && button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
         int w,h; glfwGetWindowSize(window,&w,&h);
         for (int i=0; i<3; ++i) {
             if (mouseX >= buttons[i].absX && mouseX <= buttons[i].absX+buttons[i].absW &&
@@ -1323,12 +1344,6 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
                 case 5: newZ=hitZ-1; break;
             }
             if (getBlockAt(newX,newY,newZ) != 0 && getBlockAt(newX,newY,newZ) != 5) return;
-
-            // Нельзя ставить блок внутрь хитбокса игрока: это ломает движение/ломание блоков.
-            glm::vec3 playerMin, playerMax;
-            getPlayerAABB(playerPos, playerMin, playerMax);
-            if (intersectsSolidBlockAABB(playerMin, playerMax, newX, newY, newZ)) return;
-
             setBlockAt(newX,newY,newZ, currentBlockType);
         }
     }
@@ -1336,6 +1351,38 @@ void mouse_button_callback(GLFWwindow* window, int button, int action, int mods)
 
 void processInput(GLFWwindow *window) {
     if (!gameStarted) return;
+    
+    float moveSpeed = 12.0f;
+    glm::vec3 moveDir = glm::vec3(0.0f);
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) moveDir += cameraFront;
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) moveDir -= cameraFront;
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) moveDir -= glm::normalize(glm::cross(cameraFront, cameraUp));
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) moveDir += glm::normalize(glm::cross(cameraFront, cameraUp));
+    
+    if (glm::length(moveDir) > 0.1f) moveDir = glm::normalize(moveDir);
+    glm::vec3 desiredMove = moveDir * moveSpeed * deltaTime;
+    
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && isOnGround) {
+        playerVelocity.y = JUMP_POWER;
+        isOnGround = false;
+    }
+    
+    playerVelocity.y += GRAVITY * deltaTime;
+    glm::vec3 delta = desiredMove;
+    delta.y = playerVelocity.y * deltaTime;
+    
+    glm::vec3 feetPos = cameraPos - glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
+    glm::vec3 actualDelta = applyCollision(feetPos, delta);
+    feetPos += actualDelta;
+    cameraPos = feetPos + glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
+    
+    if (feetPos.y < 0.0f) {
+        feetPos.y = 0.0f;
+        cameraPos = feetPos + glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
+        playerVelocity.y = 0.0f;
+        isOnGround = true;
+    }
+    
     for (int i=1; i<=9; ++i) {
         if (glfwGetKey(window, GLFW_KEY_0 + i) == GLFW_PRESS) {
             if (blockTypes.find(i) != blockTypes.end()) currentBlockType = i;
@@ -1343,7 +1390,9 @@ void processInput(GLFWwindow *window) {
     }
 }
 
+// ----------------------------------------------------------------------
 // Шейдеры
+// ----------------------------------------------------------------------
 const char *vertexShaderSource = R"(
 #version 330 core
 layout (location = 0) in vec3 aPos;
@@ -1434,7 +1483,9 @@ void initReticle() {
     glBindVertexArray(0);
 }
 
+// ----------------------------------------------------------------------
 // main
+// ----------------------------------------------------------------------
 int main() {
     glfwInit();
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -1449,33 +1500,14 @@ int main() {
     glfwSetWindowPos(window, 0, 0);
     glfwMakeContextCurrent(window);
     glfwSetFramebufferSizeCallback(window, [](GLFWwindow*, int w, int h) { glViewport(0, 0, w, h); });
-    glfwSetCursorPosCallback(window, [](GLFWwindow* win, double x, double y) {
+    glfwSetCursorPosCallback(window, [](GLFWwindow*, double x, double y) {
         mouseX = x; mouseY = y;
         if (!gameStarted) return;
-        if (ignoreMouseEvent) { ignoreMouseEvent = false; return; }
-
-        int ww = 0, wh = 0;
-        glfwGetWindowSize(win, &ww, &wh);
-        double centerX = ww * 0.5;
-        double centerY = wh * 0.5;
-
-        if (firstMouse) {
-            lastX = static_cast<float>(centerX);
-            lastY = static_cast<float>(centerY);
-            ignoreMouseEvent = true;
-            glfwSetCursorPos(win, centerX, centerY);
-            firstMouse = false;
-            return;
-        }
-
-        float xoffset = static_cast<float>(x - centerX);
-        float yoffset = static_cast<float>(centerY - y);
-
-        ignoreMouseEvent = true;
-        glfwSetCursorPos(win, centerX, centerY);
-        lastX = static_cast<float>(centerX);
-        lastY = static_cast<float>(centerY);
-
+        static bool first = true;
+        if (first) { lastX = x; lastY = y; first = false; }
+        float xoffset = x - lastX;
+        float yoffset = lastY - y;
+        lastX = x; lastY = y;
         const float sensitivity = 0.1f;
         xoffset *= sensitivity; yoffset *= sensitivity;
         yaw += xoffset; pitch += yoffset;
@@ -1513,7 +1545,6 @@ int main() {
     u_projLoc = glGetUniformLocation(shaderProgram, "projection");
 
     if (!loadBlockConfig("blocks.json")) { std::cerr << "Failed to load block config\n"; return -1; }
-    initPrismMesh();
 
     // ImGui
     IMGUI_CHECKVERSION();
@@ -1528,6 +1559,7 @@ int main() {
     loadMenuTextures();
     int screenW = mode->width, screenH = mode->height;
     updateButtonPositions(screenW, screenH);
+    updatePhotoPosition(screenW, screenH);
 
     // Шум
     initWorldNoise();
@@ -1535,7 +1567,6 @@ int main() {
     // Музыка
     scanMusicFolder();
     gameStarted = false;
-    loadingInProgress = false;
 
     while (!glfwWindowShouldClose(window)) {
         float now = glfwGetTime();
@@ -1545,89 +1576,46 @@ int main() {
         if (!gameStarted) {
             glClearColor(0,0,0,1);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-            glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE);
+            glDisable(GL_DEPTH_TEST); 
+            glDisable(GL_CULL_FACE);
+            
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            
             if (menuBackgroundTexture) drawRectangle(0,0,screenW,screenH,menuBackgroundTexture,screenW,screenH);
+            if (menuPhotoTexture) drawRectangle(photoAbsX, photoAbsY, photoAbsW, photoAbsH, menuPhotoTexture, screenW, screenH);
             for (int i=0;i<3;++i) if(menuButtonTexture) drawRectangle(buttons[i].absX,buttons[i].absY,buttons[i].absW,buttons[i].absH,menuButtonTexture,screenW,screenH);
             
-            if (loadingInProgress) {
-                ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
-                ImGui::SetNextWindowPos(ImVec2(screenW/2 - 100, screenH/2 + 80));
-                ImGui::SetNextWindowBgAlpha(0.5f);
-                ImGui::Begin("Loading", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
-                ImGui::Text("Loading world... Please wait.");
-                ImGui::End();
-                ImGui::Render();
-                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-            }
-            
-            glEnable(GL_DEPTH_TEST); glEnable(GL_CULL_FACE);
+            glDisable(GL_BLEND);
+            glEnable(GL_DEPTH_TEST); 
+            glEnable(GL_CULL_FACE);
             
             if (buttons[0].clicked) {
-                buttons[0].clicked=false;
-                loadingInProgress = true;
-                resetPlayer();
-                if (!workerThread.joinable()) {
-                    workerRunning = true;
-                    workerThread = std::thread(workerFunction);
-                }
+                buttons[0].clicked=false; gameStarted=true; glfwSetInputMode(window,GLFW_CURSOR,GLFW_CURSOR_DISABLED);
+                workerThread = std::thread(workerFunction);
                 updateChunksAroundCamera(cameraPos);
+                placePlayerOnGround();
+                initReticle();
+                startMusic();
             }
             if (buttons[1].clicked) {
-                buttons[1].clicked=false;
-                loadingInProgress = true;
-                resetPlayer();
-                if (!workerThread.joinable()) {
-                    workerRunning = true;
-                    workerThread = std::thread(workerFunction);
-                }
+                buttons[1].clicked=false; gameStarted=true; glfwSetInputMode(window,GLFW_CURSOR,GLFW_CURSOR_DISABLED);
+                workerThread = std::thread(workerFunction);
                 updateChunksAroundCamera(cameraPos);
+                placePlayerOnGround();
+                initReticle();
+                startMusic();
             }
-            if (buttons[2].clicked) {
-                buttons[2].clicked=false;
-                break;
-            }
-            
-            if (loadingInProgress) {
-                int centerCX = (int)std::floor(playerPos.x / CHUNK_SIZE_X);
-                int centerCZ = (int)std::floor(playerPos.z / CHUNK_SIZE_Z);
-                bool allReady = true;
-                for (int dx = -2; dx <= 2; ++dx) {
-                    for (int dz = -2; dz <= 2; ++dz) {
-                        glm::ivec2 cp(centerCX + dx, centerCZ + dz);
-                        auto it = loadedChunks.find(cp);
-                        if (it == loadedChunks.end() || !it->second.data) {
-                            allReady = false;
-                            break;
-                        }
-                    }
-                    if (!allReady) break;
-                }
-                if (allReady) {
-                    gameStarted = true;
-                    loadingInProgress = false;
-                    int ww = 0, wh = 0;
-                    glfwGetWindowSize(window, &ww, &wh);
-                    lastX = ww * 0.5f;
-                    lastY = wh * 0.5f;
-                    firstMouse = true;
-                    ignoreMouseEvent = false;
-                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-                    initReticle();
-                    startMusic();
-                } else {
-                    updateChunksAroundCamera(cameraPos);
-                }
-            }
+            if (buttons[2].clicked) { buttons[2].clicked=false; break; }
         } else {
             processInput(window);
-            updatePlayer(deltaTime);
             updateMusic();
             updateChunksAroundCamera(cameraPos);
             glClearColor(0.53f, 0.81f, 0.92f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glm::mat4 model = glm::mat4(1.0f);
             glm::mat4 view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraUp);
-            int w,h; glfwGetFramebufferSize(window,&w,&h);
+            int w,h; glfwGetWindowSize(window,&w,&h);
             glm::mat4 projection = glm::perspective(glm::radians(65.0f), (float)w/(float)h, 0.1f, 1000.0f);
             glUseProgram(shaderProgram);
             glUniformMatrix4fv(u_modelLoc,1,GL_FALSE,glm::value_ptr(model));
@@ -1635,7 +1623,6 @@ int main() {
             glUniformMatrix4fv(u_projLoc,1,GL_FALSE,glm::value_ptr(projection));
             glUniform1f(u_time_location, now);
             for (auto& pair : loadedChunks) pair.second.render();
-            renderPlayerSizedPrism();
             updateWaterChunksCache();
             if (glm::distance(cameraPos, lastCameraPosForWaterSort) > 0.5f) {
                 std::sort(waterChunksCache.begin(), waterChunksCache.end(),
@@ -1660,13 +1647,11 @@ int main() {
             ImGui::Begin("Debug", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
             ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
             ImGui::Text("Chunks: %zu", loadedChunks.size());
-            ImGui::Text("Camera: (%.1f, %.1f, %.1f)", cameraPos.x, cameraPos.y, cameraPos.z);
+            ImGui::Text("Pos: (%.1f, %.1f, %.1f)", cameraPos.x, cameraPos.y, cameraPos.z);
             ImGui::Text("Block: %s", blockTypes[currentBlockType].name.c_str());
-            ImGui::Text("Mode: Free camera (WASD + Space/C)");
+            ImGui::Text("OnGround: %s", isOnGround ? "Yes" : "No");
             if (ImGui::Button("Exit to Menu")) {
                 gameStarted = false;
-                firstMouse = true;
-                ignoreMouseEvent = false;
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
                 for (auto& pair : loadedChunks) {
                     for (auto& p : pair.second.vaoPerType) {
@@ -1677,17 +1662,13 @@ int main() {
                 loadedChunks.clear(); waterChunksCacheValid = false;
                 workerRunning = false;
                 if (workerThread.joinable()) workerThread.join();
-                {
-                    std::lock_guard<std::mutex> lock(chunkMutex);
-                    pendingData.clear();
-                    pendingLoad.clear();
-                    pendingGen.clear();
-                }
+                workerRunning = true;
                 glfwGetWindowSize(window, &screenW, &screenH);
                 updateButtonPositions(screenW, screenH);
+                updatePhotoPosition(screenW, screenH);
                 stopMusic();
-                loadingInProgress = false;
-                workerRunning = true;
+                playerVelocity = glm::vec3(0.0f);
+                isOnGround = false;
             }
             ImGui::End(); ImGui::Render(); ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
@@ -1697,25 +1678,24 @@ int main() {
 
     if (gameStarted) {
         saveAllChunks();
-    }
-    workerRunning = false;
-    if (workerThread.joinable()) workerThread.join();
-    for (auto& pair : loadedChunks) {
-        for (auto& p : pair.second.vaoPerType) {
-            glDeleteVertexArrays(1, &p.second);
-            glDeleteBuffers(1, &pair.second.vboPerType[p.first]);
+        workerRunning = false;
+        if (workerThread.joinable()) workerThread.join();
+        for (auto& pair : loadedChunks) {
+            for (auto& p : pair.second.vaoPerType) {
+                glDeleteVertexArrays(1, &p.second);
+                glDeleteBuffers(1, &pair.second.vboPerType[p.first]);
+            }
         }
     }
     stopMusic();
     if (menuBackgroundTexture) glDeleteTextures(1, &menuBackgroundTexture);
     if (menuButtonTexture) glDeleteTextures(1, &menuButtonTexture);
+    if (menuPhotoTexture) glDeleteTextures(1, &menuPhotoTexture);
     glDeleteVertexArrays(1, &uiVAO); glDeleteBuffers(1, &uiVBO); glDeleteBuffers(1, &uiEBO); glDeleteProgram(uiShaderProgram);
     ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplGlfw_Shutdown(); ImGui::DestroyContext();
     for (auto& p : blockTypes) glDeleteTextures(1, &p.second.textureID);
     glDeleteProgram(shaderProgram);
     glDeleteVertexArrays(1, &reticleVAO); glDeleteProgram(reticleProgram);
-    if (prismVAO) glDeleteVertexArrays(1, &prismVAO);
-    if (prismVBO) glDeleteBuffers(1, &prismVBO);
     glfwTerminate();
     return 0;
 }
