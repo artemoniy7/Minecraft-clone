@@ -74,7 +74,7 @@ const int CHUNK_SIZE_Z = 17;
 const int CHUNK_SIZE_Y = 128;
 
 // ----------------------------------------------------------------------
-// Физика и коллизии (ИСПРАВЛЕНО)
+// Физика и коллизии
 // ----------------------------------------------------------------------
 glm::vec3 playerVelocity = glm::vec3(0.0f);
 bool isOnGround = false;
@@ -83,7 +83,6 @@ const float JUMP_POWER = 8.0f;
 const float PLAYER_HEIGHT = 1.8f;
 const float PLAYER_WIDTH = 0.6f;
 const float EYE_HEIGHT = 1.62f;
-const float COLLISION_EPSILON = 0.001f;   // Добавлено для стабильности
 
 // Прототипы функций
 int getBlockAt(int wx, int wy, int wz);
@@ -91,14 +90,7 @@ void setBlockAt(int wx, int wy, int wz, int type);
 int getBlockAtForMesh(int wx, int wy, int wz);
 
 // ----------------------------------------------------------------------
-// Вспомогательная функция для корректного вычисления индекса чанка (исправлена)
-// ----------------------------------------------------------------------
-inline int getChunkCoord(int worldCoord, int chunkSize) {
-    return worldCoord >= 0 ? worldCoord / chunkSize : (worldCoord - chunkSize + 1) / chunkSize;
-}
-
-// ----------------------------------------------------------------------
-// Реализация коллизий (исправлена)
+// Реализация коллизий (исправленная)
 // ----------------------------------------------------------------------
 bool isSolidBlock(int blockId) {
     return blockId != 0 && blockId != 5; // вода проходима
@@ -106,9 +98,8 @@ bool isSolidBlock(int blockId) {
 
 bool checkPlayerCollision(const glm::vec3& feetPos) {
     float halfWidth = PLAYER_WIDTH * 0.5f;
-    // Добавляем эпсилон-зону, чтобы избежать "залипания"
-    glm::vec3 minCorner = feetPos + glm::vec3(-halfWidth, COLLISION_EPSILON, -halfWidth);
-    glm::vec3 maxCorner = feetPos + glm::vec3( halfWidth, PLAYER_HEIGHT - COLLISION_EPSILON,  halfWidth);
+    glm::vec3 minCorner = feetPos + glm::vec3(-halfWidth, 0.0f, -halfWidth);
+    glm::vec3 maxCorner = feetPos + glm::vec3( halfWidth, PLAYER_HEIGHT,  halfWidth);
     
     int minX = static_cast<int>(std::floor(minCorner.x));
     int maxX = static_cast<int>(std::floor(maxCorner.x));
@@ -139,50 +130,44 @@ bool checkPlayerCollision(const glm::vec3& feetPos) {
 bool isOnGroundCheck(const glm::vec3& feetPos) {
     glm::vec3 below = feetPos;
     below.y -= 0.05f;
-    return checkPlayerCollision(below) || checkPlayerCollision(feetPos + glm::vec3(0.0f, -0.01f, 0.0f));
+    return checkPlayerCollision(below);
 }
 
 glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     glm::vec3 newFeetPos = oldFeetPos;
     glm::vec3 actualDelta(0.0f);
     
-    // --- Ось X (независимо) ---
-    float xStep = (delta.x > 0.0f) ? COLLISION_EPSILON : -COLLISION_EPSILON;
-    float xRemaining = std::abs(delta.x);
+    // Ось X
     newFeetPos.x += delta.x;
     if (checkPlayerCollision(newFeetPos)) {
         newFeetPos.x = oldFeetPos.x;
-        for (float t = COLLISION_EPSILON; t <= xRemaining; t += COLLISION_EPSILON) {
-            newFeetPos.x = oldFeetPos.x + xStep * t;
+        float step = (delta.x > 0.0f) ? 0.01f : -0.01f;
+        for (float t = 0.01f; t <= std::abs(delta.x); t += 0.01f) {
+            newFeetPos.x = oldFeetPos.x + step * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.x -= xStep;
+                newFeetPos.x -= step;
                 break;
             }
         }
     }
     actualDelta.x = newFeetPos.x - oldFeetPos.x;
     
-    // --- Ось Z (используем позицию после X, но проверяем отдельно) ---
-    glm::vec3 posAfterX = newFeetPos;
-    float zStep = (delta.z > 0.0f) ? COLLISION_EPSILON : -COLLISION_EPSILON;
-    float zRemaining = std::abs(delta.z);
+    // Ось Z
     newFeetPos.z += delta.z;
     if (checkPlayerCollision(newFeetPos)) {
-        newFeetPos.z = posAfterX.z;
-        for (float t = COLLISION_EPSILON; t <= zRemaining; t += COLLISION_EPSILON) {
-            newFeetPos.z = posAfterX.z + zStep * t;
+        newFeetPos.z = oldFeetPos.z;
+        float step = (delta.z > 0.0f) ? 0.01f : -0.01f;
+        for (float t = 0.01f; t <= std::abs(delta.z); t += 0.01f) {
+            newFeetPos.z = oldFeetPos.z + step * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.z -= zStep;
+                newFeetPos.z -= step;
                 break;
             }
         }
     }
-    actualDelta.z = newFeetPos.z - posAfterX.z;
+    actualDelta.z = newFeetPos.z - oldFeetPos.z;
     
-    // --- Ось Y (после X и Z) ---
-    glm::vec3 posAfterXZ = newFeetPos;
-    float yStep = (delta.y > 0.0f) ? COLLISION_EPSILON : -COLLISION_EPSILON;
-    float yRemaining = std::abs(delta.y);
+    // Ось Y
     newFeetPos.y += delta.y;
     if (checkPlayerCollision(newFeetPos)) {
         if (delta.y > 0.0f) {
@@ -190,16 +175,17 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
         } else if (delta.y < 0.0f) {
             playerVelocity.y = 0.0f; // земля
         }
-        newFeetPos.y = posAfterXZ.y;
-        for (float t = COLLISION_EPSILON; t <= yRemaining; t += COLLISION_EPSILON) {
-            newFeetPos.y = posAfterXZ.y + yStep * t;
+        newFeetPos.y = oldFeetPos.y;
+        float step = (delta.y > 0.0f) ? 0.01f : -0.01f;
+        for (float t = 0.01f; t <= std::abs(delta.y); t += 0.01f) {
+            newFeetPos.y = oldFeetPos.y + step * t;
             if (checkPlayerCollision(newFeetPos)) {
-                newFeetPos.y -= yStep;
+                newFeetPos.y -= step;
                 break;
             }
         }
     }
-    actualDelta.y = newFeetPos.y - posAfterXZ.y;
+    actualDelta.y = newFeetPos.y - oldFeetPos.y;
     
     isOnGround = isOnGroundCheck(newFeetPos);
     return actualDelta;
@@ -207,18 +193,13 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
 
 void placePlayerOnGround() {
     glm::vec3 feetPos = cameraPos - glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
-    // Опускаемся сверху вниз
-    float startY = feetPos.y;
-    for (float y = startY; y > -10.0f; y -= 0.1f) {
-        feetPos.y = y;
-        if (checkPlayerCollision(feetPos)) {
-            feetPos.y += 0.05f;
-            break;
-        }
+    while (feetPos.y > -10.0f && !checkPlayerCollision(feetPos)) {
+        feetPos.y -= 0.1f;
     }
-    while (checkPlayerCollision(feetPos)) {
+    while (feetPos.y < CHUNK_SIZE_Y && checkPlayerCollision(feetPos)) {
         feetPos.y += 0.05f;
     }
+    feetPos.y -= 0.05f;
     cameraPos = feetPos + glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
     playerVelocity = glm::vec3(0.0f);
     isOnGround = true;
@@ -1100,12 +1081,12 @@ struct Chunk {
 };
 
 // ----------------------------------------------------------------------
-// getBlockAtForMesh с кешированием (исправлено)
+// getBlockAtForMesh с кешированием
 // ----------------------------------------------------------------------
 int getBlockAtForMesh(int wx, int wy, int wz) {
     if (wy < 0 || wy >= CHUNK_SIZE_Y) return 0;
-    int cx = getChunkCoord(wx, CHUNK_SIZE_X);
-    int cz = getChunkCoord(wz, CHUNK_SIZE_Z);
+    int cx = (wx >= 0) ? wx / CHUNK_SIZE_X : (wx - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
+    int cz = (wz >= 0) ? wz / CHUNK_SIZE_Z : (wz - CHUNK_SIZE_Z + 1) / CHUNK_SIZE_Z;
     if (lastChunkForMesh && lastChunkCoordsForMesh.x == cx && lastChunkCoordsForMesh.y == cz) {
         int lx = wx - cx * CHUNK_SIZE_X;
         int lz = wz - cz * CHUNK_SIZE_Z;
@@ -1125,11 +1106,10 @@ int getBlockAtForMesh(int wx, int wy, int wz) {
     return BLOCK_UNKNOWN;
 }
 
-// Исправленная getBlockAt
 int getBlockAt(int wx, int wy, int wz) {
     if (wy < 0 || wy >= CHUNK_SIZE_Y) return 0;
-    int cx = getChunkCoord(wx, CHUNK_SIZE_X);
-    int cz = getChunkCoord(wz, CHUNK_SIZE_Z);
+    int cx = (wx >= 0) ? wx / CHUNK_SIZE_X : (wx - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
+    int cz = (wz >= 0) ? wz / CHUNK_SIZE_Z : (wz - CHUNK_SIZE_Z + 1) / CHUNK_SIZE_Z;
     auto it = loadedChunks.find({cx, cz});
     if (it == loadedChunks.end()) return 0;
     int lx = wx - cx * CHUNK_SIZE_X;
@@ -1139,8 +1119,8 @@ int getBlockAt(int wx, int wy, int wz) {
 
 void setBlockAt(int wx, int wy, int wz, int type) {
     if (wy < 0 || wy >= CHUNK_SIZE_Y) return;
-    int cx = getChunkCoord(wx, CHUNK_SIZE_X);
-    int cz = getChunkCoord(wz, CHUNK_SIZE_Z);
+    int cx = (wx >= 0) ? wx / CHUNK_SIZE_X : (wx - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
+    int cz = (wz >= 0) ? wz / CHUNK_SIZE_Z : (wz - CHUNK_SIZE_Z + 1) / CHUNK_SIZE_Z;
     auto it = loadedChunks.find({cx, cz});
     if (it == loadedChunks.end()) return;
     int lx = wx - cx * CHUNK_SIZE_X;
@@ -1215,7 +1195,7 @@ void saveAllChunks() {
     for (auto& pair : loadedChunks) {
         if (pair.second.dirty) pair.second.saveAsync();
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
 }
 
 // ----------------------------------------------------------------------
