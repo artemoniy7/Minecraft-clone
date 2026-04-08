@@ -67,7 +67,7 @@ float deltaTime = 0.0f;
 float lastFrame = 0.0f;
 
 // ----------------------------------------------------------------------
-// Параметры чанков (вынесены наверх, чтобы были доступны везде)
+// Параметры чанков
 // ----------------------------------------------------------------------
 const int CHUNK_SIZE_X = 17;
 const int CHUNK_SIZE_Z = 17;
@@ -84,21 +84,18 @@ const float PLAYER_HEIGHT = 1.8f;
 const float PLAYER_WIDTH = 0.6f;
 const float EYE_HEIGHT = 1.62f;
 
-// Прототипы функций (чтобы коллизии могли их вызывать)
+// Прототипы функций
 int getBlockAt(int wx, int wy, int wz);
 void setBlockAt(int wx, int wy, int wz, int type);
 int getBlockAtForMesh(int wx, int wy, int wz);
 
 // ----------------------------------------------------------------------
-// Физика и коллизии (исправленная версия)
+// Реализация коллизий (исправленная)
 // ----------------------------------------------------------------------
-
 bool isSolidBlock(int blockId) {
-    // Вода (5) проходима, все остальные блоки считаются твёрдыми
-    return blockId != 0 && blockId != 5;
+    return blockId != 0 && blockId != 5; // вода проходима
 }
 
-// Проверяет, пересекается ли AABB игрока с каким-либо твёрдым блоком
 bool checkPlayerCollision(const glm::vec3& feetPos) {
     float halfWidth = PLAYER_WIDTH * 0.5f;
     glm::vec3 minCorner = feetPos + glm::vec3(-halfWidth, 0.0f, -halfWidth);
@@ -116,7 +113,6 @@ bool checkPlayerCollision(const glm::vec3& feetPos) {
             for (int z = minZ; z <= maxZ; ++z) {
                 int blockId = getBlockAt(x, y, z);
                 if (isSolidBlock(blockId)) {
-                    // AABB блока: центр в целых координатах, половинный размер 0.5
                     glm::vec3 blockMin(x - 0.5f, y - 0.5f, z - 0.5f);
                     glm::vec3 blockMax(x + 0.5f, y + 0.5f, z + 0.5f);
                     if (minCorner.x <= blockMax.x && maxCorner.x >= blockMin.x &&
@@ -131,22 +127,19 @@ bool checkPlayerCollision(const glm::vec3& feetPos) {
     return false;
 }
 
-// Проверяет, есть ли твёрдый блок непосредственно под ногами игрока (с допуском epsilon)
 bool isOnGroundCheck(const glm::vec3& feetPos) {
-    glm::vec3 feetBelow = feetPos;
-    feetBelow.y -= 0.05f;
-    return checkPlayerCollision(feetBelow);
+    glm::vec3 below = feetPos;
+    below.y -= 0.05f;
+    return checkPlayerCollision(below);
 }
 
-// Применяет коллизию к движению, возвращает реальное смещение ног
 glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     glm::vec3 newFeetPos = oldFeetPos;
-    glm::vec3 actualDelta = glm::vec3(0.0f);
+    glm::vec3 actualDelta(0.0f);
     
-    // ----- Обработка оси X -----
+    // Ось X
     newFeetPos.x += delta.x;
     if (checkPlayerCollision(newFeetPos)) {
-        // Откатываем и пытаемся придвинуться вплотную к стене
         newFeetPos.x = oldFeetPos.x;
         float step = (delta.x > 0.0f) ? 0.01f : -0.01f;
         for (float t = 0.01f; t <= std::abs(delta.x); t += 0.01f) {
@@ -159,7 +152,7 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     }
     actualDelta.x = newFeetPos.x - oldFeetPos.x;
     
-    // ----- Обработка оси Z -----
+    // Ось Z
     newFeetPos.z += delta.z;
     if (checkPlayerCollision(newFeetPos)) {
         newFeetPos.z = oldFeetPos.z;
@@ -174,18 +167,14 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     }
     actualDelta.z = newFeetPos.z - oldFeetPos.z;
     
-    // ----- Обработка оси Y -----
+    // Ось Y
     newFeetPos.y += delta.y;
     if (checkPlayerCollision(newFeetPos)) {
-        // Если столкнулись при движении вверх (потолок)
         if (delta.y > 0.0f) {
-            playerVelocity.y = 0.0f;
+            playerVelocity.y = 0.0f; // потолок
+        } else if (delta.y < 0.0f) {
+            playerVelocity.y = 0.0f; // земля
         }
-        // Если столкнулись при движении вниз (земля)
-        else if (delta.y < 0.0f) {
-            playerVelocity.y = 0.0f;
-        }
-        // Откатываем и придвигаемся к поверхности
         newFeetPos.y = oldFeetPos.y;
         float step = (delta.y > 0.0f) ? 0.01f : -0.01f;
         for (float t = 0.01f; t <= std::abs(delta.y); t += 0.01f) {
@@ -198,29 +187,24 @@ glm::vec3 applyCollision(const glm::vec3& oldFeetPos, const glm::vec3& delta) {
     }
     actualDelta.y = newFeetPos.y - oldFeetPos.y;
     
-    // Обновляем состояние "на земле"
     isOnGround = isOnGroundCheck(newFeetPos);
-    
     return actualDelta;
 }
 
-// Устанавливает игрока на поверхность ближайшего твёрдого блока
 void placePlayerOnGround() {
     glm::vec3 feetPos = cameraPos - glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
-    // Опускаем, пока не коснёмся земли
     while (feetPos.y > -10.0f && !checkPlayerCollision(feetPos)) {
         feetPos.y -= 0.1f;
     }
-    // Поднимаем, если внутри блока
-    while (feetPos.y < static_cast<float>(CHUNK_SIZE_Y) && checkPlayerCollision(feetPos)) {
+    while (feetPos.y < CHUNK_SIZE_Y && checkPlayerCollision(feetPos)) {
         feetPos.y += 0.05f;
     }
-    // Фиксируем позицию на поверхности
     feetPos.y -= 0.05f;
     cameraPos = feetPos + glm::vec3(0.0f, EYE_HEIGHT, 0.0f);
     playerVelocity = glm::vec3(0.0f);
     isOnGround = true;
 }
+
 // ----------------------------------------------------------------------
 // Типы блоков
 // ----------------------------------------------------------------------
